@@ -85,8 +85,12 @@ coxyz check apps/bitwarden -v   # verbose (show OK findings too)
 coxyz apply                     # preview planned fixes, confirm, then apply
 coxyz apply bitwarden -y
 
-coxyz create                    # interactive prompts
-coxyz create -C apps -n myapp -i nginx:1.27 -p 80 --apply
+coxyz create                    # interactive prompts, confirm, then create
+coxyz create -C apps -n myapp -i nginx:1.27 -p 80 -y
+
+coxyz dev add apps/nginx        # make a service editable via code-server
+coxyz dev remove apps/nginx     # revoke it
+coxyz dev list                  # show dev-enabled services
 
 coxyz show-config               # print resolved config
 coxyz edit                      # edit /etc/coxyz/config.yaml
@@ -109,6 +113,15 @@ Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
   with correct owners + perms + ACL.
 - **`list`**: parses each `compose.yaml` for image/ports and runs an audit
   to show a compliance status.
+- **`dev add/remove/list`**: makes a service editable through code-server.
+  `add` grants the `dev.principal` group (default `boxyz_dev`) a recursive
+  read/write ACL on the service's `config/` and `data/` (existing files **and**
+  a default ACL so new files inherit it), and mounts both dirs into the
+  code-server compose under `/workspace/services/<category>/<service>/`. `remove`
+  revokes *only* that group's ACL entry and unmounts. The managed mounts live in
+  a marker-delimited block (`# >>> coxyz dev ... >>>`) that is the single source
+  of truth — `list` reads it; everything else in the compose is left untouched.
+  Configured under the `dev:` key in `config.yaml`.
 
 ### ACL handling
 

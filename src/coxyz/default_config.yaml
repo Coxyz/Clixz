@@ -12,6 +12,9 @@ settings:
     komodo:
       name: komodo_runner
       kind: group              # "group" or "user"
+    boxyz_dev:
+      name: boxyz_dev
+      kind: group              # group code-server runs as (for `coxyz dev`)
 
 # Authorized categories and their owning service account.
 # Format: <category>: { user: <svc_user>, group: <svc_group> }
@@ -71,3 +74,11 @@ compose_template:
   default_internal_port: 8080
   default_timezone: "Europe/Paris"
   external_network: coxyz_network
+
+# `coxyz dev add/remove <service>`: mount a service's config/ and data/ into
+# code-server and grant the `principal` group recursive rw access on them.
+dev:
+  compose: /srv/docker/apps/code-boxyz/compose.yaml   # code-server compose to edit
+  principal: boxyz_dev                                 # key in settings.principals
+  perms: rwx                                           # granted recursively (x -> X)
+  mount_base: /workspace/services                      # in-container mount prefix

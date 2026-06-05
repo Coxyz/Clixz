@@ -31,11 +31,21 @@ from .policy import (
     resolve_service,
 )
 from .scaffold import CreateRequest, create_service, validate_service_name
+from .dev import (
+    acl_disable_cmds,
+    acl_enable_cmds,
+    add_service,
+    mount_targets,
+    read_enabled,
+    remove_service,
+)
 from .system import (
     CommandExecutionError,
+    CommandRunner,
     check_required_bins,
     detect_acl_support,
     principal_exists,
+    read_acl,
 )
 
 app = typer.Typer(
@@ -448,9 +458,9 @@ def create_cmd(
         Optional[str],
         typer.Option("--timezone", help="TZ env value."),
     ] = None,
-    apply_changes: Annotated[
+    yes: Annotated[
         bool,
-        typer.Option("--apply", help="Actually create the service (default: dry-run)."),
+        typer.Option("--yes", "-y", help="Skip confirmation prompt."),
     ] = False,
 ) -> None:
     """Scaffold a new service (interactive prompts for missing arguments)."""
@@ -504,10 +514,14 @@ def create_cmd(
     console.print(f"  timezone : {timezone}")
     console.print()
 
+    if not yes and not typer.confirm("Create this service?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
     try:
         executed = create_service(
             cfg, req,
-            dry_run=not apply_changes,
+            dry_run=False,
             acl_enabled=ctx.acl_enabled,
             principals_available=ctx.principals_available,
         )
@@ -516,17 +530,10 @@ def create_cmd(
         raise typer.Exit(code=2)
 
     for cmd in executed:
-        prefix = "[dim]DRY[/dim]" if not apply_changes else "[green]RUN[/green]"
-        console.print(f"  {prefix} {' '.join(cmd)}")
+        console.print(f"  [green]RUN[/green] {' '.join(cmd)}")
 
-    if not apply_changes:
-        console.print(
-            f"\n[dim]Dry-run mode — {len(executed)} action(s) planned. "
-            "Re-run with [bold]--apply[/bold] to execute.[/dim]"
-        )
-    else:
-        console.print(f"\n[green]✓ Created {svc_path}[/green]")
-        console.print(f"  Next: edit {svc_path}/compose.yaml and deploy via Komodo.")
+    console.print(f"\n[green]✓ Created {svc_path}[/green]")
+    console.print(f"  Next: edit {svc_path}/compose.yaml and deploy via Komodo.")
 
 
 @app.command("show-config")
@@ -600,6 +607,188 @@ def edit_cmd() -> None:
     except FileNotFoundError:
         err_console.print(f"[red]ERROR[/red] Editor not found: {command[0]}")
         raise typer.Exit(code=2)
+
+
+# ─── dev: mount services into code-server ─────────────────────────────────────
+
+dev_app = typer.Typer(
+    name="dev",
+    help="Make services editable via code-server (boxyz_dev ACL + compose mounts).",
+    no_args_is_help=True,
+)
+app.add_typer(dev_app, name="dev")
+
+
+def _dev_principal() -> tuple[str, str]:
+    """Return (kind, name) of the configured dev principal, or exit."""
+    p = ctx.config.settings.principals.get(ctx.config.dev.principal)
+    if p is None:
+        err_console.print(
+            f"[red]ERROR[/red] dev.principal '{ctx.config.dev.principal}' "
+            "is not defined in settings.principals."
+        )
+        raise typer.Exit(code=2)
+    return p.kind, p.name
+
+
+def _dev_service_dirs(svc_path: Path) -> list[Path]:
+    return [p for p in (svc_path / "config", svc_path / "data") if p.is_dir()]
+
+
+def _run_acl_commands(commands: list[list[str]]) -> None:
+    runner = CommandRunner(dry_run=False)
+    try:
+        for cmd in commands:
+            runner.run(cmd)
+    except CommandExecutionError as e:
+        err_console.print("[red]ERROR[/red] setfacl failed (run with sudo?).")
+        err_console.print(f"[red]Command[/red]: {' '.join(e.command)}")
+        if e.stderr.strip():
+            err_console.print(f"[red]stderr[/red]:\n{e.stderr.rstrip()}")
+        raise typer.Exit(code=2)
+
+
+@dev_app.command("add")
+def dev_add_cmd(
+    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
+) -> None:
+    """Enable a service for editing in code-server."""
+    _print_runtime_banner()
+    cfg, dev = ctx.config, ctx.config.dev
+
+    try:
+        cat, svc, svc_path = resolve_service(cfg, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    kind, name = _dev_principal()
+    if not ctx.acl_enabled:
+        err_console.print("[red]ERROR[/red] ACL unsupported on this filesystem.")
+        raise typer.Exit(code=2)
+    if not principal_exists(name, kind):
+        err_console.print(f"[red]ERROR[/red] {kind} '{name}' does not exist on this host.")
+        raise typer.Exit(code=2)
+    dirs = _dev_service_dirs(svc_path)
+    if not dirs:
+        err_console.print(f"[red]ERROR[/red] {cat}/{svc} has no config/ or data/ directory.")
+        raise typer.Exit(code=2)
+    if not dev.compose.is_file():
+        err_console.print(f"[red]ERROR[/red] code-server compose not found: {dev.compose}")
+        raise typer.Exit(code=2)
+
+    text = dev.compose.read_text(encoding="utf-8")
+    new_text = add_service(text, cat, svc, cfg.root_dir, dev.mount_base)
+    acl_cmds = acl_enable_cmds(dirs, kind, name, dev.perms)
+
+    console.print(f"\n[bold]Enable {cat}/{svc} for code-server[/bold]")
+    console.print(f"  grant [cyan]{name}[/cyan] ({kind}, {dev.perms}, recursive) on:")
+    for d in dirs:
+        console.print(f"    - {d}")
+    console.print(f"  mount into {dev.compose.name}:")
+    for t in mount_targets(cat, svc, dev.mount_base):
+        console.print(f"    - {t}")
+    if new_text == text:
+        console.print("  [dim](compose mounts already present)[/dim]")
+
+    if dry_run:
+        for cmd in acl_cmds:
+            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nApply?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    _run_acl_commands(acl_cmds)
+    if new_text != text:
+        dev.compose.write_text(new_text, encoding="utf-8")
+    console.print(f"\n[green]✓ {cat}/{svc} is now editable via code-server.[/green]")
+    console.print("  [dim]Redeploy code-server for the new mounts to take effect.[/dim]")
+
+
+@dev_app.command("remove")
+def dev_remove_cmd(
+    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
+) -> None:
+    """Disable a service: revoke its dev ACL and unmount it from code-server."""
+    _print_runtime_banner()
+    cfg, dev = ctx.config, ctx.config.dev
+
+    try:
+        cat, svc, svc_path = resolve_service(cfg, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    kind, name = _dev_principal()
+    if not dev.compose.is_file():
+        err_console.print(f"[red]ERROR[/red] code-server compose not found: {dev.compose}")
+        raise typer.Exit(code=2)
+
+    text = dev.compose.read_text(encoding="utf-8")
+    new_text = remove_service(text, cat, svc, cfg.root_dir, dev.mount_base)
+    dirs = _dev_service_dirs(svc_path)
+    acl_cmds = acl_disable_cmds(dirs, kind, name) if (ctx.acl_enabled and dirs) else []
+
+    console.print(f"\n[bold]Disable {cat}/{svc}[/bold]")
+    console.print(f"  revoke [cyan]{name}[/cyan] ({kind}) ACL (recursive) on:")
+    for d in dirs:
+        console.print(f"    - {d}")
+    console.print(f"  unmount from {dev.compose.name}")
+    if new_text == text:
+        console.print("  [dim](compose mounts already absent)[/dim]")
+
+    if dry_run:
+        for cmd in acl_cmds:
+            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nApply?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    _run_acl_commands(acl_cmds)
+    if new_text != text:
+        dev.compose.write_text(new_text, encoding="utf-8")
+    console.print(f"\n[green]✓ {cat}/{svc} removed from code-server dev.[/green]")
+
+
+@dev_app.command("list")
+def dev_list_cmd() -> None:
+    """List services currently editable via code-server."""
+    _print_runtime_banner()
+    cfg, dev = ctx.config, ctx.config.dev
+
+    if not dev.compose.is_file():
+        console.print(f"[dim]No code-server compose at {dev.compose}.[/dim]")
+        raise typer.Exit()
+    enabled = read_enabled(dev.compose.read_text(encoding="utf-8"), cfg.root_dir, dev.mount_base)
+    if not enabled:
+        console.print("[dim]No services enabled for dev.[/dim]")
+        raise typer.Exit()
+
+    kind, name = _dev_principal()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Category")
+    table.add_column("Service")
+    table.add_column("Mount")
+    table.add_column(f"ACL ({name})")
+    for cat, svc in enabled:
+        config_dir = cfg.root_dir / cat / svc / "config"
+        acl = read_acl(config_dir) if config_dir.is_dir() else None
+        if acl is None:
+            status = Text("—", style="dim")
+        elif (kind, name) in acl.named:
+            status = Text("✓", style="green")
+        else:
+            status = Text("missing", style="yellow")
+        table.add_row(cat, svc, f"{dev.mount_base}/{cat}/{svc}", status)
+    console.print(table)
 
 
 def cli_main() -> None:  # pragma: no cover

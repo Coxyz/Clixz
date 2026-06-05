@@ -52,6 +52,22 @@ class ComposeTemplateConfig:
 
 
 @dataclass(frozen=True)
+class DevConfig:
+    """Settings for the ``dev`` command (services editable via code-server)."""
+
+    compose: Path        # code-server compose file to edit
+    principal: str       # key in settings.principals (the code-server group)
+    perms: str = "rwx"   # ACL perms granted recursively (execute as X on dirs)
+    mount_base: str = "/workspace/services"  # container path prefix for mounts
+
+
+_DEFAULT_DEV = DevConfig(
+    compose=Path("/srv/docker/apps/code-boxyz/compose.yaml"),
+    principal="boxyz_dev",
+)
+
+
+@dataclass(frozen=True)
 class Config:
     root_dir: Path
     settings: SettingsConfig
@@ -59,6 +75,7 @@ class Config:
     rules: dict[str, RuleConfig]
     exclude: list[str]
     compose_template: ComposeTemplateConfig
+    dev: DevConfig = _DEFAULT_DEV
 
     def category(self, name: str) -> CategoryConfig:
         if name not in self.categories:
@@ -158,6 +175,23 @@ def _parse_rule_acl(
     return acl
 
 
+def _parse_dev(raw: dict) -> DevConfig:
+    """Parse the optional ``dev`` section, falling back to defaults.
+
+    The principal is validated lazily by the ``dev`` command (not here), so an
+    existing config without a ``boxyz_dev`` principal still loads fine.
+    """
+    d = raw.get("dev")
+    if not isinstance(d, dict):
+        return _DEFAULT_DEV
+    return DevConfig(
+        compose=Path(str(d.get("compose", _DEFAULT_DEV.compose))),
+        principal=str(d.get("principal", _DEFAULT_DEV.principal)),
+        perms=str(d.get("perms", _DEFAULT_DEV.perms)),
+        mount_base=str(d.get("mount_base", _DEFAULT_DEV.mount_base)),
+    )
+
+
 def _parse_config(raw: dict) -> Config:
     try:
         settings = _parse_settings(raw)
@@ -194,6 +228,7 @@ def _parse_config(raw: dict) -> Config:
             rules=rules,
             exclude=[str(p) for p in exclude_raw],
             compose_template=compose_template,
+            dev=_parse_dev(raw),
         )
     except KeyError as e:
         raise ValueError(f"Missing required key in config: {e}") from e

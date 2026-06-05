@@ -9,7 +9,6 @@ from pathlib import Path
 
 from coxyz.config import (
     CategoryConfig,
-    ComposeTemplateConfig,
     Config,
     PrincipalConfig,
     RuleConfig,
@@ -53,9 +52,6 @@ def _make_config(root: Path, owner_user: str, owner_group: str) -> Config:
             "env_file": RuleConfig(mode="600", owner="root:root", acl=None, audit_only=True),
         },
         exclude=[],
-        compose_template=ComposeTemplateConfig(
-            default_internal_port=8080, default_timezone="UTC", external_network="net",
-        ),
     )
 
 

@@ -24,6 +24,20 @@ MARKER_BEGIN = "# >>> coxyz dev (managed — do not edit by hand) >>>"
 MARKER_END = "# <<< coxyz dev (managed) <<<"
 
 
+# ─── Principal resolution ─────────────────────────────────────────────────────
+
+def resolve_principal(principals: dict, wanted: str):
+    """Find a principal by its dict key, falling back to its ``.name``.
+
+    Returns the principal (a ``PrincipalConfig``) or ``None``. Matching by name
+    too means ``principal: dev`` and ``principal: boxyz_dev`` both resolve to a
+    ``dev: {name: boxyz_dev}`` principal.
+    """
+    if wanted in principals:
+        return principals[wanted]
+    return next((p for p in principals.values() if p.name == wanted), None)
+
+
 # ─── Mount paths ──────────────────────────────────────────────────────────────
 
 def mount_targets(category: str, service: str, mount_base: str) -> list[str]:

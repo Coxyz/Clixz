@@ -23,6 +23,9 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+release = ["bump-my-version>=0.20"]
+
 [project.urls]
 Homepage = "https://github.com/Ekyoz/Coxyz-CLI"
 Repository = "https://github.com/Ekyoz/Coxyz-CLI"
@@ -38,4 +41,20 @@ version = { attr = "coxyz.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-coxyz = ["default_config.yaml", "templates/*"]
+coxyz = ["default_config.yaml"]
+
+# `make release` drives this: bumps the version, commits, and creates a vX.Y.Z
+# tag. Pushing that tag triggers .github/workflows/publish.yml → PyPI.
+[tool.bumpversion]
+current_version = "0.3.0"
+allow_dirty = false
+commit = true
+message = "Bump version: {current_version} → {new_version}"
+tag = true
+tag_name = "v{new_version}"
+tag_message = "Release v{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "src/coxyz/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'

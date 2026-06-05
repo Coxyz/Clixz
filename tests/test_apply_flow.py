@@ -13,7 +13,6 @@ import typer
 from coxyz import cli
 from coxyz.config import (
     CategoryConfig,
-    ComposeTemplateConfig,
     Config,
     PrincipalConfig,
     RuleConfig,
@@ -67,11 +66,6 @@ class ApplyFailureDisplayTests(unittest.TestCase):
                 categories={"apps": CategoryConfig(user="root", group="root")},
                 rules={"category_dir": RuleConfig(mode="750")},
                 exclude=[],
-                compose_template=ComposeTemplateConfig(
-                    default_internal_port=8080,
-                    default_timezone="UTC",
-                    external_network="proxy",
-                ),
             )
             cli.ctx.config_source = None
             cli.ctx.acl_enabled = False

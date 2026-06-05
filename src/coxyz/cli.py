@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
-from .config import Config, load_config
+from .config import Config, load_config, load_raw_config, validate_config
 from .policy import (
     Finding,
     ServiceReport,
@@ -38,6 +38,7 @@ from .dev import (
     mount_targets,
     read_enabled,
     remove_service,
+    resolve_principal,
 )
 from .system import (
     CommandExecutionError,
@@ -137,6 +138,22 @@ def _print_runtime_banner() -> None:
         f"acl={'on' if ctx.acl_enabled else 'off'}  "
         f"config={src}[/dim]"
     )
+
+
+def _check_config_structure() -> list[str]:
+    """Validate the raw config structure and print a Config section. Returns issues."""
+    try:
+        raw = load_raw_config(ctx.config_source)
+        issues = validate_config(raw)
+    except (OSError, ValueError) as e:
+        issues = [f"could not read config: {e}"]
+    console.print("\n[bold]Config[/bold]")
+    if not issues:
+        console.print("  [green]✓ structure OK[/green]")
+    else:
+        for issue in issues:
+            console.print(f"  [red]✗[/red] {issue}")
+    return issues
 
 
 def _print_finding(finding: Finding, *, indent: str = "  ") -> None:
@@ -280,8 +297,10 @@ def check_cmd(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show OK findings too.")] = False,
 ) -> None:
-    """Audit permissions/ACL (read-only). Exits non-zero if drift detected."""
+    """Audit config structure + permissions/ACL (read-only). Non-zero on drift."""
     _print_runtime_banner()
+
+    config_issues = _check_config_structure()
 
     if service:
         try:
@@ -341,11 +360,12 @@ def check_cmd(
 
     console.print(
         f"\n[dim]Summary:[/dim] "
+        f"[red]{len(config_issues)} config issue(s)[/red], "
         f"[yellow]{total_drift} drift[/yellow], "
         f"[magenta]{total_warn} warn-only[/magenta]"
     )
 
-    if total_drift > 0:
+    if total_drift > 0 or config_issues:
         raise typer.Exit(code=1)
 
 
@@ -446,24 +466,12 @@ def create_cmd(
         Optional[str],
         typer.Option("--name", "-n", help="Service name."),
     ] = None,
-    image: Annotated[
-        Optional[str],
-        typer.Option("--image", "-i", help="Docker image (e.g. nginx:1.27)."),
-    ] = None,
-    port: Annotated[
-        Optional[int],
-        typer.Option("--port", "-p", help="Internal port to expose."),
-    ] = None,
-    timezone: Annotated[
-        Optional[str],
-        typer.Option("--timezone", help="TZ env value."),
-    ] = None,
     yes: Annotated[
         bool,
         typer.Option("--yes", "-y", help="Skip confirmation prompt."),
     ] = False,
 ) -> None:
-    """Scaffold a new service (interactive prompts for missing arguments)."""
+    """Scaffold a new service: directories + empty compose.yaml and .env."""
     _print_runtime_banner()
 
     cfg = ctx.config
@@ -488,30 +496,14 @@ def create_cmd(
         err_console.print(f"[red]ERROR[/red] {e}")
         raise typer.Exit(code=2)
 
-    if not image:
-        image = typer.prompt("Docker image (with tag)", default="your-image:latest")
-    if port is None:
-        port = typer.prompt(
-            "Internal port",
-            default=cfg.compose_template.default_internal_port,
-            type=int,
-        )
-    if not timezone:
-        timezone = typer.prompt("Timezone", default=cfg.compose_template.default_timezone)
-
-    req = CreateRequest(
-        category=category, service=name, image=image,
-        port=port, timezone=timezone,
-    )
+    req = CreateRequest(category=category, service=name)
     svc_path = cfg.root_dir / category / name
 
     console.print()
     console.print("[bold]Will create:[/bold]")
-    console.print(f"  path     : {svc_path}/")
-    console.print(f"  owner    : {cfg.category(category).owner_spec}")
-    console.print(f"  image    : {image}")
-    console.print(f"  port     : {port}")
-    console.print(f"  timezone : {timezone}")
+    console.print(f"  path  : {svc_path}/")
+    console.print(f"  owner : {cfg.category(category).owner_spec}")
+    console.print("  files : compose.yaml, .env (empty), config/, data/")
     console.print()
 
     if not yes and not typer.confirm("Create this service?"):
@@ -533,7 +525,7 @@ def create_cmd(
         console.print(f"  [green]RUN[/green] {' '.join(cmd)}")
 
     console.print(f"\n[green]✓ Created {svc_path}[/green]")
-    console.print(f"  Next: edit {svc_path}/compose.yaml and deploy via Komodo.")
+    console.print(f"  Next: edit {svc_path}/compose.yaml and .env, then deploy.")
 
 
 @app.command("show-config")
@@ -620,12 +612,20 @@ app.add_typer(dev_app, name="dev")
 
 
 def _dev_principal() -> tuple[str, str]:
-    """Return (kind, name) of the configured dev principal, or exit."""
-    p = ctx.config.settings.principals.get(ctx.config.dev.principal)
+    """Resolve the configured dev principal by its key *or* its name.
+
+    Accepting either spelling avoids the key-vs-name confusion: with a config
+    principal ``dev: {name: boxyz_dev}``, both ``principal: dev`` and
+    ``principal: boxyz_dev`` resolve to it.
+    """
+    principals = ctx.config.settings.principals
+    wanted = ctx.config.dev.principal
+    p = resolve_principal(principals, wanted)
     if p is None:
+        available = ", ".join(f"{k} (name: {pr.name})" for k, pr in principals.items())
         err_console.print(
-            f"[red]ERROR[/red] dev.principal '{ctx.config.dev.principal}' "
-            "is not defined in settings.principals."
+            f"[red]ERROR[/red] dev.principal '{wanted}' matches no principal by key "
+            f"or name. Defined principals: {available or '(none)'}."
         )
         raise typer.Exit(code=2)
     return p.kind, p.name

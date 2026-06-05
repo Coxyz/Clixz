@@ -69,12 +69,6 @@ rules:
     acl: null
     audit_only: true
 
-# Compose template variables for `coxyz create`
-compose_template:
-  default_internal_port: 8080
-  default_timezone: "Europe/Paris"
-  external_network: coxyz_network
-
 # `coxyz dev add/remove <service>`: mount a service's config/ and data/ into
 # code-server and grant the `principal` group recursive rw access on them.
 dev:

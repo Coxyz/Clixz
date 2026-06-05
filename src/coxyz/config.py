@@ -45,13 +45,6 @@ class RuleConfig:
 
 
 @dataclass(frozen=True)
-class ComposeTemplateConfig:
-    default_internal_port: int
-    default_timezone: str
-    external_network: str
-
-
-@dataclass(frozen=True)
 class DevConfig:
     """Settings for the ``dev`` command (services editable via code-server)."""
 
@@ -74,7 +67,6 @@ class Config:
     categories: dict[str, CategoryConfig]
     rules: dict[str, RuleConfig]
     exclude: list[str]
-    compose_template: ComposeTemplateConfig
     dev: DevConfig = _DEFAULT_DEV
 
     def category(self, name: str) -> CategoryConfig:
@@ -210,13 +202,6 @@ def _parse_config(raw: dict) -> Config:
                 audit_only=bool(r.get("audit_only", False)),
             )
 
-        ct = raw["compose_template"]
-        compose_template = ComposeTemplateConfig(
-            default_internal_port=int(ct["default_internal_port"]),
-            default_timezone=str(ct["default_timezone"]),
-            external_network=str(ct["external_network"]),
-        )
-
         exclude_raw = raw.get("exclude", [])
         if not isinstance(exclude_raw, list):
             raise ValueError("exclude must be a list of glob patterns")
@@ -227,7 +212,6 @@ def _parse_config(raw: dict) -> Config:
             categories=categories,
             rules=rules,
             exclude=[str(p) for p in exclude_raw],
-            compose_template=compose_template,
             dev=_parse_dev(raw),
         )
     except KeyError as e:
@@ -251,3 +235,94 @@ def load_config(explicit: Path | None = None) -> tuple[Config, Path | None]:
     source = find_config_path(explicit)
     raw = _load_yaml(source) if source is not None else _load_bundled_default()
     return _parse_config(raw), source
+
+
+def load_raw_config(source: Path | None) -> dict:
+    """Read the raw config mapping for ``source`` (or the bundled default)."""
+    return _load_yaml(source) if source is not None else _load_bundled_default()
+
+
+# ─── Structural validation (for `coxyz check`) ──────────────────────────────
+
+# Top-level keys coxyz understands. Anything else is flagged as a likely typo
+# or a section indented into the wrong place.
+_KNOWN_TOP_LEVEL = {"root_dir", "settings", "komodo", "categories", "rules", "exclude", "dev"}
+_REQUIRED_RULES = {
+    "category_dir", "service_dir", "compose_file", "config_dir", "data_dir", "env_file",
+}
+
+
+def validate_config(raw: dict) -> list[str]:
+    """Return human-readable structural problems in a raw config (empty list = OK).
+
+    This is intentionally lenient and exhaustive: it collects *every* issue it
+    can find (rather than failing on the first) so ``coxyz check`` can report
+    them all — missing keys, bad values, and sections nested in the wrong place.
+    """
+    if not isinstance(raw, dict):
+        return ["top-level YAML must be a mapping"]
+
+    issues: list[str] = []
+
+    if "root_dir" not in raw:
+        issues.append("missing 'root_dir'")
+    elif not str(raw["root_dir"]).strip():
+        issues.append("'root_dir' is empty")
+
+    principals: dict = {}
+    settings = raw.get("settings")
+    if not isinstance(settings, dict):
+        if "komodo" not in raw:
+            issues.append("missing 'settings' (with a 'principals' mapping)")
+    else:
+        raw_principals = settings.get("principals")
+        if not isinstance(raw_principals, dict) or not raw_principals:
+            issues.append("'settings.principals' must be a non-empty mapping")
+        else:
+            principals = raw_principals
+            for key, p in raw_principals.items():
+                if not isinstance(p, dict):
+                    issues.append(f"settings.principals.{key} must be a mapping")
+                    continue
+                if not p.get("name"):
+                    issues.append(f"settings.principals.{key} is missing 'name'")
+                if p.get("kind") not in ("group", "user"):
+                    issues.append(f"settings.principals.{key}.kind must be 'group' or 'user'")
+        # A section nested one level too deep (e.g. 'dev:' under 'settings:').
+        for k in settings:
+            if k != "principals":
+                issues.append(f"unexpected key 'settings.{k}' — did you mean a top-level '{k}:'?")
+
+    categories = raw.get("categories")
+    if not isinstance(categories, dict) or not categories:
+        issues.append("'categories' must be a non-empty mapping")
+    else:
+        for name, c in categories.items():
+            if not isinstance(c, dict) or not c.get("user") or not c.get("group"):
+                issues.append(f"categories.{name} must define 'user' and 'group'")
+
+    rules = raw.get("rules")
+    if not isinstance(rules, dict) or not rules:
+        issues.append("'rules' must be a non-empty mapping")
+    else:
+        for name, r in rules.items():
+            if not isinstance(r, dict) or "mode" not in r:
+                issues.append(f"rules.{name} is missing 'mode'")
+        missing = _REQUIRED_RULES - set(rules)
+        if missing:
+            issues.append(f"missing required rule(s): {', '.join(sorted(missing))}")
+
+    dev = raw.get("dev")
+    if dev is not None and not isinstance(dev, dict):
+        issues.append("'dev' must be a mapping")
+    elif isinstance(dev, dict) and "principal" in dev:
+        wanted = dev["principal"]
+        names = {p.get("name") for p in principals.values() if isinstance(p, dict)}
+        if wanted not in principals and wanted not in names:
+            issues.append(f"dev.principal '{wanted}' matches no principal key or name")
+
+    for k in raw:
+        if k not in _KNOWN_TOP_LEVEL:
+            issues.append(f"unknown top-level key '{k}'")
+
+    return issues

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from coxyz.config import PrincipalConfig
 from coxyz.dev import (
     MARKER_BEGIN,
     MARKER_END,
@@ -16,6 +17,7 @@ from coxyz.dev import (
     mount_targets,
     read_enabled,
     remove_service,
+    resolve_principal,
 )
 
 ROOT = Path("/srv/docker")
@@ -141,6 +143,25 @@ class AclCommandTests(unittest.TestCase):
             ["/workspace/services/apps/nginx/config", "/workspace/services/apps/nginx/data"],
             mount_targets("apps", "nginx", "/workspace/services"),
         )
+
+
+class PrincipalResolutionTests(unittest.TestCase):
+    PRINCIPALS = {
+        "komodo": PrincipalConfig(name="boxyz_komodo", kind="group"),
+        "dev": PrincipalConfig(name="boxyz_dev", kind="user"),
+    }
+
+    def test_resolve_by_key(self) -> None:
+        self.assertEqual("boxyz_dev", resolve_principal(self.PRINCIPALS, "dev").name)
+
+    def test_resolve_by_name(self) -> None:
+        # 'boxyz_dev' is the name (and the default), not a key — must still resolve.
+        p = resolve_principal(self.PRINCIPALS, "boxyz_dev")
+        self.assertIsNotNone(p)
+        self.assertEqual(("user", "boxyz_dev"), (p.kind, p.name))
+
+    def test_resolve_unknown_returns_none(self) -> None:
+        self.assertIsNone(resolve_principal(self.PRINCIPALS, "nope"))
 
 
 if __name__ == "__main__":

@@ -1,10 +1,15 @@
-"""Scaffold a new service directory tree."""
+"""Scaffold a new service directory tree.
+
+``create`` only lays out the structure — the category/service directories,
+``config/`` and ``data/``, plus empty ``compose.yaml`` and ``.env`` files — and
+brings every path to its correct owner/mode/ACL. The operator fills in
+``compose.yaml`` and ``.env`` afterwards.
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from importlib.resources import files
 from pathlib import Path
 
 from .config import Config
@@ -18,9 +23,6 @@ SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$")
 class CreateRequest:
     category: str
     service: str
-    image: str
-    port: int
-    timezone: str
 
 
 def validate_service_name(name: str) -> None:
@@ -29,19 +31,6 @@ def validate_service_name(name: str) -> None:
             f"Invalid service name '{name}' "
             "(alphanumeric and hyphens, no leading/trailing hyphen)"
         )
-
-
-def render_compose(req: CreateRequest, svc_path: Path, network: str) -> str:
-    """Render the compose.yaml template."""
-    tpl = files("coxyz").joinpath("templates/compose.yaml.tpl").read_text(encoding="utf-8")
-    return tpl.format(
-        service=req.service,
-        image=req.image,
-        network=network,
-        port=req.port,
-        timezone=req.timezone,
-        svc_path=svc_path,
-    )
 
 
 def create_service(
@@ -68,8 +57,10 @@ def create_service(
     runner = CommandRunner(dry_run=dry_run)
 
     def apply_rule(path: Path, rule_name: str, *, is_dir: bool) -> None:
+        rule = config.rule(rule_name)
+        owner = rule.owner or cat.owner_spec
         for command in plan_path(
-            path, config.rule(rule_name), cat.owner_spec, config,
+            path, rule, owner, config,
             is_dir=is_dir, acl_enabled=acl_enabled,
             principals_available=principals_available,
         ):
@@ -81,10 +72,13 @@ def create_service(
     apply_rule(svc_path / "config", "config_dir", is_dir=True)
     apply_rule(svc_path / "data", "data_dir", is_dir=True)
 
-    # compose.yaml: write the file first, then own/permission it.
+    # Empty compose.yaml and .env — left for the operator to fill in.
     compose_file = svc_path / "compose.yaml"
-    content = render_compose(req, svc_path, config.compose_template.external_network)
-    runner.write_file(compose_file, content)
+    runner.write_file(compose_file, "")
     apply_rule(compose_file, "compose_file", is_dir=False)
+
+    env_file = svc_path / ".env"
+    runner.write_file(env_file, "")
+    apply_rule(env_file, "env_file", is_dir=False)
 
     return runner.executed

@@ -78,7 +78,7 @@ exclude:
 coxyz list                      # list services with image, ports, status
 coxyz list -C apps              # filter by category
 
-coxyz check                     # audit all services (exit 1 on drift)
+coxyz check                     # validate config + audit all services (exit 1 on drift)
 coxyz check bitwarden           # audit one service
 coxyz check apps/bitwarden -v   # verbose (show OK findings too)
 
@@ -86,7 +86,7 @@ coxyz apply                     # preview planned fixes, confirm, then apply
 coxyz apply bitwarden -y
 
 coxyz create                    # interactive prompts, confirm, then create
-coxyz create -C apps -n myapp -i nginx:1.27 -p 80 -y
+coxyz create -C apps -n myapp -y
 
 coxyz dev add apps/nginx        # make a service editable via code-server
 coxyz dev remove apps/nginx     # revoke it
@@ -104,13 +104,16 @@ Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
   - root dir, ACL principals, authorized categories
   - `exclude` glob patterns to ignore paths during audit/apply
   - per-path rules: mode, ACL perms, optional owner override, audit-only flag
-- **`check`**: read-only audit. Reports drift and warn-only (`data/`, `.env`).
+- **`check`**: read-only. First validates the config's *structure* (missing keys,
+  bad values, sections nested in the wrong place), then audits permissions/ACL —
+  reporting drift and warn-only (`data/`, `.env`).
 - **`apply`**: shows planned changes, asks for confirmation, then applies fixes.
   - Touches: category/service dirs, `compose.yaml`, the `config/` directory.
   - Never touches: `data/` contents, `.env` files (audit-only).
   - Creates required missing directories before applying path fixes.
-- **`create`**: scaffolds `<category>/<service>/{compose.yaml,config/,data/}`
-  with correct owners + perms + ACL.
+- **`create`**: scaffolds `<category>/<service>/{config/,data/}` plus **empty**
+  `compose.yaml` and `.env`, with correct owners + perms + ACL. It does not
+  template `compose.yaml` — you fill it in.
 - **`list`**: parses each `compose.yaml` for image/ports and runs an audit
   to show a compliance status.
 - **`dev add/remove/list`**: makes a service editable through code-server.

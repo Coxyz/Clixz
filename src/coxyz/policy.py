@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 
 from .config import Config, RuleConfig
+from .dev import acl_enable_cmds
 from .system import (
     Acl,
     CommandRunner,
@@ -175,6 +176,25 @@ class NamedAclEntry:
         return f"{prefix}:{self.name}:{perms_to_symbolic(self.perms)}"
 
 
+@dataclass(frozen=True)
+class DevOverlay:
+    """The extra ACL a *dev-enabled* service carries on its ``config/`` and ``data/``.
+
+    ``coxyz dev add`` grants the dev principal a recursive ``rwX`` ACL (plus a
+    default ACL so new files inherit it). The audit must treat that entry — and
+    the default ACL — as *expected* on a dev-enabled service, not as drift.
+    """
+
+    kind: str    # "user" or "group"
+    name: str    # system user/group name
+    perms: str   # configured dev perms, e.g. "rwx" (interpreted as rwX on apply)
+
+    def named_entry(self) -> NamedAclEntry:
+        """The named ACL entry as it appears on a *directory* (X resolves to x)."""
+        return NamedAclEntry(kind=self.kind, name=self.name,
+                             perms=normalize_perms(self.perms))
+
+
 def resolve_acl_entries(rule: RuleConfig, config: Config) -> list[NamedAclEntry]:
     """Translate a rule's ACL principals into concrete named ACL entries."""
     entries: list[NamedAclEntry] = []
@@ -187,14 +207,27 @@ def resolve_acl_entries(rule: RuleConfig, config: Config) -> list[NamedAclEntry]
     return entries
 
 
-def desired_acl(rule: RuleConfig, config: Config) -> Acl:
-    """The :class:`Acl` an ACL-managed path should end up with."""
+def desired_acl(
+    rule: RuleConfig, config: Config, *, dev: DevOverlay | None = None,
+) -> Acl:
+    """The :class:`Acl` an ACL-managed path should end up with.
+
+    When ``dev`` is given (a dev-enabled service's ``config/`` or ``data/``), the
+    dev principal's named entry and a default ACL are part of the expected state.
+    """
     user, group, other = mode_to_perms(rule.mode)
     entries = resolve_acl_entries(rule, config)
     named = {(e.kind, e.name): e.perms for e in entries}
-    mask = union_perms(group, *(e.perms for e in entries))
+    perms_for_mask = [e.perms for e in entries]
+    has_default = False
+    if dev is not None:
+        dev_entry = dev.named_entry()
+        named[(dev_entry.kind, dev_entry.name)] = dev_entry.perms
+        perms_for_mask.append(dev_entry.perms)
+        has_default = True
+    mask = union_perms(group, *perms_for_mask)
     return Acl(user=user, group=group, other=other,
-               named=named, mask=mask, has_default=False)
+               named=named, mask=mask, has_default=has_default)
 
 
 def acl_set_spec(rule: RuleConfig, config: Config) -> str:
@@ -305,8 +338,10 @@ def _diff_acl(actual: Acl, desired: Acl) -> list[str]:
             f"acl mask is {_fmt_perms(actual.mask)}, expected {_fmt_perms(desired.mask)} "
             "(a narrow mask silently reduces effective rights)"
         )
-    if actual.has_default:
+    if actual.has_default and not desired.has_default:
         issues.append("unexpected default acl present")
+    elif desired.has_default and not actual.has_default:
+        issues.append("missing default acl (dev inheritance)")
 
     return issues
 
@@ -390,6 +425,34 @@ def _audit_acl(
     fixes.append(_setfacl_set_cmd(state.path, rule, config))
 
 
+def _setfacl_modify_base_cmd(path: Path, rule: RuleConfig, config: Config) -> list[str]:
+    """Set the base mode (+ rule ACL entries) WITHOUT touching default/dev entries.
+
+    Uses ``-m`` (modify) rather than ``--set``/``-b`` so the dev principal's
+    recursive entry and the default ACL survive — those are owned by
+    ``coxyz dev``, not the rule.
+    """
+    return ["setfacl", "-m", acl_set_spec(rule, config), str(path)]
+
+
+def _audit_dev_acl(
+    state: PathState, rule: RuleConfig, config: Config, dev: DevOverlay,
+    issues: list[str], fixes: list[list[str]],
+) -> None:
+    """Audit a dev-enabled ``config/``/``data/`` path: base mode + dev ACL + default."""
+    if state.acl is None:
+        issues.append("could not read acl (getfacl failed)")
+        return
+    acl_issues = _diff_acl(state.acl, desired_acl(rule, config, dev=dev))
+    if not acl_issues:
+        return
+    issues.extend(acl_issues)
+    # Reconcile non-destructively: fix the base mode, then (re)grant the dev ACL
+    # recursively with its default — never wiping it with --set/-b.
+    fixes.append(_setfacl_modify_base_cmd(state.path, rule, config))
+    fixes.extend(acl_enable_cmds([state.path], dev.kind, dev.name, dev.perms))
+
+
 def _audit_path(
     path: Path,
     rule_name: str,
@@ -399,8 +462,13 @@ def _audit_path(
     *,
     acl_enabled: bool,
     principals_available: dict[str, bool],
+    dev: DevOverlay | None = None,
 ) -> Finding:
-    """Audit a single path against a rule; return a Finding with planned fixes."""
+    """Audit a single path against a rule; return a Finding with planned fixes.
+
+    When ``dev`` is set the path belongs to a dev-enabled service, so the dev
+    principal's recursive ACL and a default ACL are expected (not drift).
+    """
     state = read_state(path)
 
     # ── Missing path ─────────────────────────────────────────────────────────
@@ -424,7 +492,9 @@ def _audit_path(
     fixes: list[list[str]] = []
 
     _audit_owner(state, expected_owner, issues, fixes)
-    if rule.acl is None:
+    if dev is not None and acl_enabled:
+        _audit_dev_acl(state, rule, config, dev, issues, fixes)
+    elif rule.acl is None:
         _audit_plain_mode(state, rule, issues, fixes)
     else:
         _audit_acl(state, rule, config, issues, fixes,
@@ -445,12 +515,17 @@ def audit_service(
     *,
     acl_enabled: bool,
     principals_available: dict[str, bool],
+    dev: DevOverlay | None = None,
 ) -> ServiceReport:
-    """Run a full audit of a single service."""
+    """Run a full audit of a single service.
+
+    ``dev`` is set when this service is enabled for code-server editing; its
+    ``config/`` and ``data/`` then legitimately carry the dev principal's ACL.
+    """
     svc_path = config.root_dir / category / service
     report = ServiceReport(category=category, service=service, path=svc_path)
 
-    def add(path: Path, rule_name: str) -> None:
+    def add(path: Path, rule_name: str, *, dev_aware: bool = False) -> None:
         if is_excluded_path(config, path):
             return
         rule = config.rule(rule_name)
@@ -458,6 +533,7 @@ def audit_service(
             _audit_path(
                 path, rule_name, rule, _expected_owner(config, category, rule), config,
                 acl_enabled=acl_enabled, principals_available=principals_available,
+                dev=dev if dev_aware else None,
             )
         )
 
@@ -472,9 +548,10 @@ def audit_service(
             issues=["compose.yaml not found"],
         ))
 
-    # config/ and data/: only the directory itself, not its contents.
-    add(svc_path / "config", "config_dir")
-    add(svc_path / "data", "data_dir")
+    # config/ and data/: only the directory itself, not its contents. When the
+    # service is dev-enabled these carry the dev principal's ACL + a default ACL.
+    add(svc_path / "config", "config_dir", dev_aware=True)
+    add(svc_path / "data", "data_dir", dev_aware=True)
 
     env_file = svc_path / ".env"
     if env_file.is_file():

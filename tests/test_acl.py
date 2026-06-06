@@ -15,6 +15,7 @@ from coxyz.config import (
     SettingsConfig,
 )
 from coxyz.policy import (
+    DevOverlay,
     Severity,
     acl_set_spec,
     apply_findings,
@@ -183,6 +184,100 @@ class AclApplyIntegrationTests(unittest.TestCase):
             f for f in self._audit_drifts() if f.rule_name == "service_dir"
         )
         self.assertTrue(any("mask" in issue for issue in svc_finding.issues))
+
+
+class DevAwareDesiredAclTests(unittest.TestCase):
+    """A dev-enabled config/ or data/ expects the dev entry + a default ACL."""
+
+    def test_dev_overlay_adds_entry_default_and_widens_mask(self) -> None:
+        cfg = _make_config(Path("/srv/docker"), "svc", "svc")
+        overlay = DevOverlay(kind="user", name="boxyz_dev", perms="rwx")
+        # config_dir: group r-x, komodo --x, dev rwx -> mask must widen to rwx.
+        acl = desired_acl(cfg.rule("config_dir"), cfg, dev=overlay)
+        self.assertEqual("rwx", acl.named[("user", "boxyz_dev")])
+        self.assertEqual("x", acl.named[("group", PRINCIPAL_GROUP)])
+        self.assertEqual("rwx", acl.mask)
+        self.assertTrue(acl.has_default, "dev paths expect a default ACL")
+
+
+class DevAwareAuditIntegrationTests(unittest.TestCase):
+    """A dev-enabled service's config/ + data/ ACL must not read as drift."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        if not detect_acl_support(self.root):
+            self.tmp.cleanup()
+            self.skipTest("filesystem has no ACL support")
+        # config_dir/data_dir carry no rule ACL — only the dev overlay (matches
+        # the real config where dev access is managed entirely by `coxyz dev`).
+        self.cfg = Config(
+            root_dir=self.root,
+            settings=SettingsConfig(
+                principals={"komodo": PrincipalConfig(name=PRINCIPAL_GROUP, kind="group")}
+            ),
+            categories={"apps": CategoryConfig(user=_self_user(), group=_self_group())},
+            rules={
+                "category_dir": RuleConfig(mode="750", acl={"komodo": "rx"}),
+                "service_dir": RuleConfig(mode="750", acl={"komodo": "rx"}),
+                "compose_file": RuleConfig(mode="660", acl={"komodo": "rw"}),
+                "config_dir": RuleConfig(mode="750", acl=None),
+                "data_dir": RuleConfig(mode="750", acl=None),
+                "env_file": RuleConfig(mode="600", owner="root:root", acl=None, audit_only=True),
+            },
+            exclude=[],
+        )
+        self.svc = self.root / "apps" / "svc"
+        self.svc.mkdir(parents=True)
+        self.config_dir = self.svc / "config"
+        self.config_dir.mkdir()
+        (self.svc / "data").mkdir()
+        (self.svc / "compose.yaml").write_text("services: {}\n")
+        # Bring the service tree to compliance first (owner/mode/komodo ACL).
+        apply_findings(self._drifts(dev=None), dry_run=False)
+        # Then enable dev: grant a recursive user ACL + default, like `dev add`.
+        self.overlay = DevOverlay(kind="user", name=_self_user(), perms="rwx")
+        for path in (self.config_dir, self.svc / "data"):
+            subprocess.run(["setfacl", "-R", "-m", f"u:{_self_user()}:rwX", str(path)], check=True)
+            subprocess.run(["setfacl", "-dR", "-m", f"u:{_self_user()}:rwX", str(path)], check=True)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _drifts(self, *, dev: DevOverlay | None) -> list:
+        report = audit_service(
+            self.cfg, "apps", "svc", acl_enabled=True,
+            principals_available={"komodo": True}, dev=dev,
+        )
+        return [f for f in report.findings if f.severity is Severity.DRIFT]
+
+    def test_dev_acl_is_not_drift_when_dev_enabled(self) -> None:
+        drifts = self._drifts(dev=self.overlay)
+        offenders = [f.rule_name for f in drifts]
+        self.assertNotIn("config_dir", offenders)
+        self.assertNotIn("data_dir", offenders)
+
+    def test_dev_acl_is_drift_when_not_dev_enabled(self) -> None:
+        # Same on-disk state, but the service is no longer dev-enabled: the
+        # leftover dev ACL is correctly flagged for removal.
+        names = {f.rule_name for f in self._drifts(dev=None)}
+        self.assertIn("config_dir", names)
+
+    def test_dev_fix_never_wipes_with_set_or_bare(self) -> None:
+        # Break the base mode so the dev path drifts, then check the fix is
+        # non-destructive (no `--set`, no `-b`/`-k` that would drop the dev ACL).
+        subprocess.run(["setfacl", "-m", "u::rwx,g::rwx,o::---", str(self.config_dir)], check=True)
+        finding = next(
+            f for f in self._drifts(dev=self.overlay) if f.rule_name == "config_dir"
+        )
+        for cmd in finding.fixes:
+            self.assertNotIn("--set", cmd)
+            self.assertNotIn("-b", cmd)
+            self.assertNotIn("-k", cmd)
+        # And applying it converges.
+        apply_findings([finding], dry_run=False)
+        self.assertEqual([], [f for f in self._drifts(dev=self.overlay)
+                              if f.rule_name == "config_dir"])
 
 
 def _self_user() -> str:

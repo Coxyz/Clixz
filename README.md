@@ -111,6 +111,12 @@ Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
   - Touches: category/service dirs, `compose.yaml`, the `config/` directory.
   - Never touches: `data/` contents, `.env` files (audit-only).
   - Creates required missing directories before applying path fixes.
+- **Dev-mode awareness**: both `check` and `apply` first read the code-server
+  compose to learn which services are dev-enabled. For those services the dev
+  principal's recursive ACL **and** the default ACL on `config/` and `data/` are
+  treated as *expected* — not drift — and any fix is non-destructive (it never
+  uses `setfacl --set`/`-b`, which would wipe the dev grant). A leftover dev ACL
+  on a service that is *not* dev-enabled is still correctly flagged for removal.
 - **`create`**: scaffolds `<category>/<service>/{config/,data/}` plus **empty**
   `compose.yaml` and `.env`, with correct owners + perms + ACL. It does not
   template `compose.yaml` — you fill it in.

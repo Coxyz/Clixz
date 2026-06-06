@@ -20,6 +20,7 @@ from rich.text import Text
 from . import __version__
 from .config import Config, load_config, load_raw_config, validate_config
 from .policy import (
+    DevOverlay,
     Finding,
     ServiceReport,
     Severity,
@@ -156,6 +157,32 @@ def _check_config_structure() -> list[str]:
     return issues
 
 
+def _dev_enabled_set() -> set[tuple[str, str]]:
+    """Services currently mounted into code-server (the dev compose managed block)."""
+    dev = ctx.config.dev
+    if not dev.compose.is_file():
+        return set()
+    try:
+        text = dev.compose.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    return set(read_enabled(text, ctx.config.root_dir, dev.mount_base))
+
+
+def _dev_overlay(category: str, service: str, enabled: set[tuple[str, str]]) -> Optional[DevOverlay]:
+    """The dev ACL overlay expected on a dev-enabled service, or None.
+
+    Resolves the dev principal softly: a misconfigured ``dev.principal`` simply
+    means no overlay (the config check reports it separately) rather than a crash.
+    """
+    if (category, service) not in enabled:
+        return None
+    p = resolve_principal(ctx.config.settings.principals, ctx.config.dev.principal)
+    if p is None:
+        return None
+    return DevOverlay(kind=p.kind, name=p.name, perms=ctx.config.dev.perms)
+
+
 def _print_finding(finding: Finding, *, indent: str = "  ") -> None:
     style = _severity_style(finding.severity)
     sym = _severity_symbol(finding.severity)
@@ -255,12 +282,14 @@ def list_cmd(
     n_drift = 0
     n_warn = 0
 
+    dev_enabled = _dev_enabled_set()
     for cat, svc, path in services:
         image, ports = _parse_compose_summary(path / "compose.yaml")
         report = audit_service(
             ctx.config, cat, svc,
             acl_enabled=ctx.acl_enabled,
             principals_available=ctx.principals_available,
+            dev=_dev_overlay(cat, svc, dev_enabled),
         )
         if report.compliant:
             status = Text("✓ ok", style="green")
@@ -301,6 +330,7 @@ def check_cmd(
     _print_runtime_banner()
 
     config_issues = _check_config_structure()
+    dev_enabled = _dev_enabled_set()
 
     if service:
         try:
@@ -308,6 +338,7 @@ def check_cmd(
             reports = [audit_service(
                 ctx.config, cat, svc,
                 acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+                dev=_dev_overlay(cat, svc, dev_enabled),
             )]
         except ValueError as e:
             err_console.print(f"[red]ERROR[/red] {e}")
@@ -317,6 +348,7 @@ def check_cmd(
             audit_service(
                 ctx.config, cat, svc,
                 acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+                dev=_dev_overlay(cat, svc, dev_enabled),
             )
             for cat, svc, _ in list_services(ctx.config)
         ]
@@ -406,10 +438,12 @@ def apply_cmd(
             acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
         ))
 
+    dev_enabled = _dev_enabled_set()
     for cat, svc in targets:
         report = audit_service(
             ctx.config, cat, svc,
             acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+            dev=_dev_overlay(cat, svc, dev_enabled),
         )
         all_findings.extend(report.findings)
 

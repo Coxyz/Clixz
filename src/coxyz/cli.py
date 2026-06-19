@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
-from .config import Config, load_config, load_raw_config, validate_config
+from .config import Config, RuleConfig, load_config, load_raw_config, validate_config
 from .policy import (
     DevOverlay,
     Finding,
@@ -26,21 +26,16 @@ from .policy import (
     Severity,
     apply_findings,
     audit_category,
+    audit_external_dir,
     audit_service,
     list_categories,
+    list_external_subdirs,
     list_services,
+    plan_path,
     resolve_service,
 )
 from .scaffold import CreateRequest, create_service, validate_service_name
-from .build import (
-    BUILD_PERMS,
-    BUILD_PRINCIPAL,
-    DOCKERFILE_NAME,
-    build_dirs,
-    dockerfile_path,
-    dockerfile_template,
-    is_build_enabled,
-)
+from .image import DOCKERFILE_NAME, dockerfile_template, validate_image_name
 from .meta import (
     SERVICE_FILENAME,
     ManifestResult,
@@ -424,6 +419,21 @@ def check_cmd(
             f"{manifest_result.private_count} private[/green]"
         )
 
+    # External directories (images / repos) — owner/mode of each build context.
+    ext_findings: list[Finding] = []
+    for label, ext in (("images", ctx.config.images), ("repos", ctx.config.repos)):
+        ext_findings.extend(audit_external_dir(
+            ctx.config, ext, f"{label}_dir",
+            acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+        ))
+    if any(f.severity is not Severity.OK for f in ext_findings) or verbose:
+        console.print("\n[bold]External dirs (images / repos)[/bold]")
+        for f in ext_findings:
+            if verbose or f.severity is not Severity.OK:
+                _print_finding(f)
+    total_drift += sum(1 for f in ext_findings if f.severity is Severity.DRIFT)
+    total_warn += sum(1 for f in ext_findings if f.severity is Severity.WARN)
+
     console.print(
         f"\n[dim]Summary:[/dim] "
         f"[red]{len(config_issues)} config issue(s)[/red], "
@@ -481,6 +491,14 @@ def apply_cmd(
             dev=_dev_overlay(cat, svc, dev_enabled),
         )
         all_findings.extend(report.findings)
+
+    # External dirs (images / repos) when applying to everything.
+    if not service:
+        for label, ext in (("images", ctx.config.images), ("repos", ctx.config.repos)):
+            all_findings.extend(audit_external_dir(
+                ctx.config, ext, f"{label}_dir",
+                acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+            ))
 
     drifts = [f for f in all_findings if f.severity is Severity.DRIFT]
     warns = [f for f in all_findings if f.severity is Severity.WARN]
@@ -794,6 +812,10 @@ def show_config_cmd() -> None:
     for name, c in sorted(cfg.categories.items()):
         console.print(f"  {name:12} → {c.owner_spec}")
 
+    console.print("\n[bold]External dirs[/bold]")
+    for label, ext in (("images", cfg.images), ("repos", cfg.repos)):
+        console.print(f"  {label:7} → {ext.dir}  [dim]({ext.owner}, {ext.mode})[/dim]")
+
     console.print(f"\n[bold]Exclude[/bold] ({len(cfg.exclude)})")
     for pattern in cfg.exclude:
         console.print(f"  - {pattern}")
@@ -1047,180 +1069,147 @@ def dev_list_cmd() -> None:
     console.print(table)
 
 
-# ─── build: let a service build its image from a Dockerfile ───────────────────
+# ─── image: manage self-built image build contexts under /opt/images ──────────
 
-build_app = typer.Typer(
-    name="build",
-    help="Mark a service as building its own image (config/Dockerfile + komodo read ACL).",
+image_app = typer.Typer(
+    name="image",
+    help="Manage self-built image build contexts (/opt/images/<name>).",
     no_args_is_help=True,
 )
-app.add_typer(build_app, name="build")
+app.add_typer(image_app, name="image")
 
 
-def _komodo_principal() -> tuple[str, str]:
-    """Resolve the komodo principal (kind, name) used to read build contexts."""
-    p = ctx.config.settings.principals.get(BUILD_PRINCIPAL)
-    if p is None:
-        err_console.print(
-            f"[red]ERROR[/red] No '{BUILD_PRINCIPAL}' principal in config "
-            "(needed to grant Komodo read access for builds)."
+def _image_rule() -> RuleConfig:
+    """The owner/mode rule for image build directories (no ACL — world-readable)."""
+    img = ctx.config.images
+    return RuleConfig(mode=img.mode, acl=None, owner=img.owner)
+
+
+@image_app.command("add")
+def image_add_cmd(
+    name: Annotated[str, typer.Argument(help="Image name (directory under the images dir).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
+) -> None:
+    """Scaffold a self-built image build context: dir + owner/mode + Dockerfile."""
+    _print_runtime_banner()
+    img = ctx.config.images
+
+    try:
+        validate_image_name(name)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    path = img.dir / name
+    if path.exists():
+        err_console.print(f"[red]ERROR[/red] {path} already exists.")
+        raise typer.Exit(code=2)
+
+    rule = _image_rule()
+    dir_cmds = plan_path(
+        path, rule, img.owner, ctx.config, is_dir=True,
+        acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+    )
+    dfile = path / DOCKERFILE_NAME
+
+    console.print(f"\n[bold]Create image build context[/bold] {path}/")
+    console.print(f"  owner : {img.owner}    mode : {img.mode}")
+    console.print(f"  files : {DOCKERFILE_NAME} (template)")
+
+    if dry_run:
+        for cmd in dir_cmds:
+            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nCreate it?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    runner = CommandRunner(dry_run=False)
+    try:
+        for cmd in dir_cmds:
+            runner.run(cmd)
+        runner.write_file(dfile, dockerfile_template(name))
+        user, _, group = img.owner.partition(":")
+        if user_exists(user) and group_exists(group):
+            runner.run(["chown", img.owner, str(dfile)])
+        runner.run(["chmod", "664", str(dfile)])
+    except (CommandExecutionError, OSError) as e:
+        err_console.print(f"[red]ERROR[/red] Could not create {path}: {e} (run with sudo?)")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[green]✓ Created {path}[/green]")
+    console.print(f"  Edit {path}/{DOCKERFILE_NAME} + add your sources, then build with Komodo")
+    console.print(f"  (context = {path}). The matching /srv/docker service just uses the image.")
+
+
+@image_app.command("remove")
+def image_remove_cmd(
+    name: Annotated[str, typer.Argument(help="Image name (directory under the images dir).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+) -> None:
+    """Delete an image build context directory (and ALL its contents)."""
+    _print_runtime_banner()
+    img = ctx.config.images
+    path = img.dir / name
+
+    if not path.is_dir():
+        err_console.print(f"[red]ERROR[/red] No such image build context: {path}")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[bold]Delete image build context[/bold] {path}/")
+    console.print("  [yellow]This removes the directory and ALL its contents (Dockerfile + sources).[/yellow]")
+    if not yes and not typer.confirm("\nDelete it?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    runner = CommandRunner(dry_run=False)
+    try:
+        runner.run(["rm", "-rf", str(path)])
+    except CommandExecutionError as e:
+        err_console.print(f"[red]ERROR[/red] Could not delete {path}: {e} (run with sudo?)")
+        raise typer.Exit(code=2)
+    console.print(f"\n[green]✓ Deleted {path}[/green]")
+
+
+@image_app.command("list")
+def image_list_cmd() -> None:
+    """List image build contexts with their Dockerfile presence and compliance."""
+    _print_runtime_banner()
+    img = ctx.config.images
+
+    subs = list_external_subdirs(img)
+    if not subs:
+        console.print(f"[dim]No image build contexts under {img.dir}.[/dim]")
+        raise typer.Exit()
+
+    findings = {
+        f.path: f
+        for f in audit_external_dir(
+            ctx.config, img, "image_dir",
+            acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
         )
-        raise typer.Exit(code=2)
-    return p.kind, p.name
+    }
 
-
-@build_app.command("add")
-def build_add_cmd(
-    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
-) -> None:
-    """Enable build mode: scaffold config/Dockerfile + grant komodo read on config/ & data/."""
-    _print_runtime_banner()
-    cfg = ctx.config
-
-    try:
-        cat, svc, svc_path = resolve_service(cfg, service)
-    except ValueError as e:
-        err_console.print(f"[red]ERROR[/red] {e}")
-        raise typer.Exit(code=2)
-
-    kind, name = _komodo_principal()
-    if not ctx.acl_enabled:
-        err_console.print("[red]ERROR[/red] ACL unsupported on this filesystem.")
-        raise typer.Exit(code=2)
-    if not principal_exists(name, kind):
-        err_console.print(f"[red]ERROR[/red] {kind} '{name}' does not exist on this host.")
-        raise typer.Exit(code=2)
-    if not (svc_path / "config").is_dir():
-        err_console.print(f"[red]ERROR[/red] {cat}/{svc} has no config/ directory.")
-        raise typer.Exit(code=2)
-
-    dirs = build_dirs(svc_path)
-    dfile = dockerfile_path(svc_path)
-    create_dockerfile = not dfile.exists()
-    acl_cmds = acl_enable_cmds(dirs, kind, name, BUILD_PERMS)
-
-    console.print(f"\n[bold]Enable build for {cat}/{svc}[/bold]")
-    if create_dockerfile:
-        console.print(f"  create [cyan]config/{DOCKERFILE_NAME}[/cyan] (template)")
-    else:
-        console.print(f"  [dim](config/{DOCKERFILE_NAME} already present)[/dim]")
-    console.print(f"  grant [cyan]{name}[/cyan] ({kind}, {BUILD_PERMS}, recursive) on:")
-    for d in dirs:
-        console.print(f"    - {d}")
-
-    if dry_run:
-        for cmd in acl_cmds:
-            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
-        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
-        raise typer.Exit()
-    if not yes and not typer.confirm("\nApply?"):
-        console.print("[dim]Aborted.[/dim]")
-        raise typer.Exit(code=1)
-
-    if create_dockerfile:
-        from .policy import plan_path  # local import: avoids reshuffling module imports
-        rule = cfg.rule_or_default("service_file")
-        owner = rule.owner or cfg.category(cat).owner_spec
-        runner = CommandRunner(dry_run=False)
-        try:
-            runner.write_file(dfile, dockerfile_template(svc))
-            for cmd in plan_path(
-                dfile, rule, owner, cfg, is_dir=False,
-                acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
-            ):
-                runner.run(cmd)
-        except (CommandExecutionError, OSError) as e:
-            err_console.print(f"[red]ERROR[/red] Could not write {dfile}: {e} (run with sudo?)")
-            raise typer.Exit(code=2)
-
-    _run_acl_commands(acl_cmds)
-    console.print(f"\n[green]✓ {cat}/{svc} is now build-enabled.[/green]")
-    console.print(f"  Edit [bold]config/{DOCKERFILE_NAME}[/bold]; build with context = data/:")
-    console.print(f"    [dim]docker build -f {svc_path}/config/{DOCKERFILE_NAME} {svc_path}/data[/dim]")
-
-
-@build_app.command("remove")
-def build_remove_cmd(
-    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
-    keep_dockerfile: Annotated[
-        bool, typer.Option("--keep-dockerfile", help="Revoke ACL but keep config/Dockerfile."),
-    ] = False,
-) -> None:
-    """Disable build mode: revoke komodo's read ACL and remove config/Dockerfile."""
-    _print_runtime_banner()
-    cfg = ctx.config
-
-    try:
-        cat, svc, svc_path = resolve_service(cfg, service)
-    except ValueError as e:
-        err_console.print(f"[red]ERROR[/red] {e}")
-        raise typer.Exit(code=2)
-
-    kind, name = _komodo_principal()
-    dirs = build_dirs(svc_path)
-    acl_cmds = acl_disable_cmds(dirs, kind, name) if (ctx.acl_enabled and dirs) else []
-    dfile = dockerfile_path(svc_path)
-    remove_df = dfile.is_file() and not keep_dockerfile
-
-    console.print(f"\n[bold]Disable build for {cat}/{svc}[/bold]")
-    console.print(f"  revoke [cyan]{name}[/cyan] ({kind}) ACL (recursive) on:")
-    for d in dirs:
-        console.print(f"    - {d}")
-    if remove_df:
-        console.print(f"  delete [cyan]config/{DOCKERFILE_NAME}[/cyan]")
-    elif dfile.is_file():
-        console.print(f"  [dim](keeping config/{DOCKERFILE_NAME} — apply will re-enable it)[/dim]")
-
-    if dry_run:
-        for cmd in acl_cmds:
-            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
-        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
-        raise typer.Exit()
-    if not yes and not typer.confirm("\nApply?"):
-        console.print("[dim]Aborted.[/dim]")
-        raise typer.Exit(code=1)
-
-    _run_acl_commands(acl_cmds)
-    if remove_df:
-        try:
-            dfile.unlink()
-        except OSError as e:
-            err_console.print(f"[red]ERROR[/red] Could not delete {dfile}: {e} (run with sudo?)")
-            raise typer.Exit(code=2)
-    console.print(f"\n[green]✓ {cat}/{svc} build mode disabled.[/green]")
-
-
-@build_app.command("list")
-def build_list_cmd() -> None:
-    """List services that build their own image (config/Dockerfile present)."""
-    _print_runtime_banner()
-    cfg = ctx.config
-
-    enabled = [(c, s, p) for c, s, p in list_services(cfg) if is_build_enabled(p)]
-    if not enabled:
-        console.print("[dim]No build-enabled services (none carry config/Dockerfile).[/dim]")
-        raise typer.Exit()
-
-    kind, name = _komodo_principal()
     table = Table(show_header=True, header_style="bold")
-    table.add_column("Category")
-    table.add_column("Service")
+    table.add_column("Image")
     table.add_column("Dockerfile")
-    table.add_column(f"komodo ACL ({name})")
-    for cat, svc, path in enabled:
-        config_dir = path / "config"
-        acl = read_acl(config_dir) if config_dir.is_dir() else None
-        if acl is None:
-            status = Text("—", style="dim")
-        elif (kind, name) in acl.named:
-            status = Text("✓ config", style="green")
+    table.add_column("Perms")
+    for path in subs:
+        has_df = (path / DOCKERFILE_NAME).is_file()
+        f = findings.get(path)
+        if f is None or f.severity is Severity.OK:
+            perms = Text("✓ ok", style="green")
+        elif f.severity is Severity.DRIFT:
+            perms = Text("✗ drift", style="yellow")
         else:
-            status = Text("missing (run apply)", style="yellow")
-        table.add_row(cat, svc, f"config/{DOCKERFILE_NAME}", status)
+            perms = Text("! " + f.severity.value, style="magenta")
+        table.add_row(
+            path.name,
+            Text("✓", style="green") if has_df else Text("—", style="dim"),
+            perms,
+        )
     console.print(table)
 
 

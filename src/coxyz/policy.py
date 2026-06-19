@@ -20,8 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from .build import BUILD_PERMS, BUILD_PRINCIPAL, is_build_enabled
-from .config import Config, RuleConfig
+from .config import Config, ExternalDirConfig, RuleConfig
 from .dev import acl_enable_cmds
 from .system import (
     Acl,
@@ -540,16 +539,6 @@ def audit_service(
     svc_path = config.root_dir / category / service
     report = ServiceReport(category=category, service=service, path=svc_path)
 
-    # Build-enabled service (carries config/Dockerfile): the komodo principal
-    # gets a recursive read ACL on config/ + data/ so Komodo can read the build
-    # context. Treated like the dev overlay — expected, not drift.
-    build_overlay: DevOverlay | None = None
-    komodo = config.settings.principals.get(BUILD_PRINCIPAL)
-    if (komodo is not None and acl_enabled
-            and principals_available.get(BUILD_PRINCIPAL, False)
-            and is_build_enabled(svc_path)):
-        build_overlay = DevOverlay(kind=komodo.kind, name=komodo.name, perms=BUILD_PERMS)
-
     def add(path: Path, rule_name: str, *, dev_aware: bool = False) -> None:
         if is_excluded_path(config, path):
             return
@@ -559,7 +548,6 @@ def audit_service(
                 path, rule_name, rule, _expected_owner(config, category, rule), config,
                 acl_enabled=acl_enabled, principals_available=principals_available,
                 dev=dev if dev_aware else None,
-                build=build_overlay if dev_aware else None,
             )
         )
 
@@ -611,6 +599,34 @@ def audit_category(
         cat_path, "category_dir", rule, _expected_owner(config, category, rule), config,
         acl_enabled=acl_enabled, principals_available=principals_available,
     )
+
+
+# ─── External directories (images / repos) ────────────────────────────────────
+
+def list_external_subdirs(ext: ExternalDirConfig) -> list[Path]:
+    """Immediate subdirectories of an external dir (each image / repo)."""
+    if not ext.dir.is_dir():
+        return []
+    return [p for p in sorted(ext.dir.iterdir()) if p.is_dir()]
+
+
+def audit_external_dir(
+    config: Config, ext: ExternalDirConfig, rule_name: str,
+    *, acl_enabled: bool, principals_available: dict[str, bool],
+) -> list[Finding]:
+    """Audit each subdirectory of an external dir against its owner/mode.
+
+    Plain (no ACL): the dirs are world-readable so Komodo can build, and owned
+    by the dev principal so they stay editable. Contents are left to the dev.
+    """
+    rule = RuleConfig(mode=ext.mode, acl=None, owner=ext.owner)
+    return [
+        _audit_path(
+            child, rule_name, rule, ext.owner, config,
+            acl_enabled=acl_enabled, principals_available=principals_available,
+        )
+        for child in list_external_subdirs(ext)
+    ]
 
 
 # ─── Applying ─────────────────────────────────────────────────────────────────

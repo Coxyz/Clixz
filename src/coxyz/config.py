@@ -60,6 +60,26 @@ _DEFAULT_DEV = DevConfig(
 )
 
 
+@dataclass(frozen=True)
+class ExternalDirConfig:
+    """A directory of subdirectories coxyz manages outside ``root_dir``.
+
+    Used for ``images`` (self-built image build contexts under ``/opt/images``)
+    and ``repos`` (source repos under ``/opt/repos``). Each immediate
+    subdirectory (``<dir>/<name>/``) is brought to ``owner``/``mode``. The
+    convention: owned by the dev principal (editable via code-server), and
+    world-readable so Komodo Periphery can read the build context to build.
+    """
+
+    dir: Path
+    owner: str = "boxyz_dev:boxyz_dev"   # "user:group" for each subdirectory
+    mode: str = "775"                    # group writes (devs), others read (builder)
+
+
+_DEFAULT_IMAGES = ExternalDirConfig(dir=Path("/opt/images"))
+_DEFAULT_REPOS = ExternalDirConfig(dir=Path("/opt/repos"))
+
+
 # Built-in rule defaults used when a config predates a newer rule. This keeps
 # coxyz working against an existing /etc/coxyz/config.yaml that has not yet been
 # updated with the rule (e.g. ``service_file`` introduced for ``service.yaml``).
@@ -77,6 +97,8 @@ class Config:
     rules: dict[str, RuleConfig]
     exclude: list[str]
     dev: DevConfig = _DEFAULT_DEV
+    images: ExternalDirConfig = _DEFAULT_IMAGES
+    repos: ExternalDirConfig = _DEFAULT_REPOS
     manifest_path: Path | None = None
 
     def category(self, name: str) -> CategoryConfig:
@@ -216,6 +238,18 @@ def _parse_dev(raw: dict) -> DevConfig:
     )
 
 
+def _parse_external_dir(raw: dict, key: str, default: ExternalDirConfig) -> ExternalDirConfig:
+    """Parse an optional ``images``/``repos`` section, falling back to defaults."""
+    d = raw.get(key)
+    if not isinstance(d, dict):
+        return default
+    return ExternalDirConfig(
+        dir=Path(str(d.get("dir", default.dir))),
+        owner=str(d.get("owner", default.owner)),
+        mode=str(d.get("mode", default.mode)),
+    )
+
+
 def _parse_config(raw: dict) -> Config:
     try:
         settings = _parse_settings(raw)
@@ -250,6 +284,8 @@ def _parse_config(raw: dict) -> Config:
             rules=rules,
             exclude=[str(p) for p in exclude_raw],
             dev=_parse_dev(raw),
+            images=_parse_external_dir(raw, "images", _DEFAULT_IMAGES),
+            repos=_parse_external_dir(raw, "repos", _DEFAULT_REPOS),
             manifest_path=manifest_path,
         )
     except KeyError as e:
@@ -284,7 +320,10 @@ def load_raw_config(source: Path | None) -> dict:
 
 # Top-level keys coxyz understands. Anything else is flagged as a likely typo
 # or a section indented into the wrong place.
-_KNOWN_TOP_LEVEL = {"root_dir", "settings", "komodo", "categories", "rules", "exclude", "dev", "api"}
+_KNOWN_TOP_LEVEL = {
+    "root_dir", "settings", "komodo", "categories", "rules", "exclude",
+    "dev", "api", "images", "repos",
+}
 _REQUIRED_RULES = {
     "category_dir", "service_dir", "compose_file", "config_dir", "data_dir", "env_file",
 }
@@ -362,6 +401,15 @@ def validate_config(raw: dict) -> list[str]:
     api = raw.get("api")
     if api is not None and not isinstance(api, dict):
         issues.append("'api' must be a mapping (e.g. api.manifest: /path/to/manifest.json)")
+
+    for ext_key in ("images", "repos"):
+        ext = raw.get(ext_key)
+        if ext is None:
+            continue
+        if not isinstance(ext, dict):
+            issues.append(f"'{ext_key}' must be a mapping (dir, owner, mode)")
+        elif not ext.get("dir"):
+            issues.append(f"'{ext_key}.dir' is required when '{ext_key}' is set")
 
     for k in raw:
         if k not in _KNOWN_TOP_LEVEL:

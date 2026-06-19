@@ -97,9 +97,9 @@ coxyz dev add apps/nginx        # make a service editable via code-server
 coxyz dev remove apps/nginx     # revoke it
 coxyz dev list                  # show dev-enabled services
 
-coxyz build add apps/api        # service builds its own image (Dockerfile + komodo ACL)
-coxyz build remove apps/api     # disable build mode
-coxyz build list                # show build-enabled services
+coxyz image add api             # scaffold a self-built image context in /opt/images
+coxyz image remove api          # delete an image build context
+coxyz image list                # list image build contexts
 
 coxyz show-config               # print resolved config
 coxyz edit                      # edit /etc/coxyz/config.yaml
@@ -145,20 +145,24 @@ Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
   service (won't overwrite). **`meta validate`**: validates descriptors only.
 - **`check`** also validates every `service.yaml` (a missing one is a warning; a
   malformed one is an error that fails the check).
-- **`build` mode** (`build add/remove/list`): for a service that builds its own
-  image. A service is *build-enabled* when it carries a **`config/Dockerfile`**
-  — that file's presence is the signal. `check`/`apply` then grant the **komodo**
-  principal a recursive **read** ACL (`rX` + a default ACL) on the service's
-  `config/` and `data/`, so Komodo Periphery (which runs with that group) can
-  read the build context — **without** widening any base mode or exposing other
-  services. `build add` scaffolds the Dockerfile (Node.js template, won't
-  overwrite) and applies the ACL; `build remove` revokes it and deletes the
-  Dockerfile (`--keep-dockerfile` to keep it). Because the signal is the file
-  itself, `coxyz apply` keeps the ACL in sync automatically. Recommended build
-  invocation (keeps `.env` out of the context):
+- **Self-built images** live **outside** the service tree, in their own build
+  context under `images.dir` (default `/opt/images/<name>/` — Dockerfile +
+  sources). The matching service under `/srv/docker` stays empty: it just
+  *consumes* the built image, exactly like a third-party image. Same convention
+  for source repos under `repos.dir` (default `/opt/repos`).
+  - **`image add/remove/list`**: `add` scaffolds `<images.dir>/<name>/` with the
+    configured `owner`/`mode` (default `boxyz_dev:boxyz_dev`, `775`) plus a
+    Dockerfile template; `remove` deletes the whole context; `list` shows each
+    context with its Dockerfile/compliance.
+  - The `775` mode means the dev principal's group can edit while *others* (the
+    root Komodo Periphery process) can read — so Komodo builds the context with
+    no per-service ACL and **without** touching `/srv/docker` isolation.
+  - Configure the locations under the `images:` and `repos:` sections; `check`/
+    `apply` then enforce the owner/mode of every `<dir>/<name>` directory.
 
   ```bash
-  docker build -f /srv/docker/apps/api/config/Dockerfile /srv/docker/apps/api/data
+  # Build with Komodo (or the CLI): context = the image's own directory.
+  docker build -t api-coxyz:latest /opt/images/api
   ```
 - **`list`**: parses each `compose.yaml` for image/ports and runs an audit
   to show a compliance status.

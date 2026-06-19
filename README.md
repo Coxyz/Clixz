@@ -97,6 +97,10 @@ coxyz dev add apps/nginx        # make a service editable via code-server
 coxyz dev remove apps/nginx     # revoke it
 coxyz dev list                  # show dev-enabled services
 
+coxyz build add apps/api        # service builds its own image (Dockerfile + komodo ACL)
+coxyz build remove apps/api     # disable build mode
+coxyz build list                # show build-enabled services
+
 coxyz show-config               # print resolved config
 coxyz edit                      # edit /etc/coxyz/config.yaml
 ```
@@ -141,6 +145,21 @@ Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
   service (won't overwrite). **`meta validate`**: validates descriptors only.
 - **`check`** also validates every `service.yaml` (a missing one is a warning; a
   malformed one is an error that fails the check).
+- **`build` mode** (`build add/remove/list`): for a service that builds its own
+  image. A service is *build-enabled* when it carries a **`config/Dockerfile`**
+  — that file's presence is the signal. `check`/`apply` then grant the **komodo**
+  principal a recursive **read** ACL (`rX` + a default ACL) on the service's
+  `config/` and `data/`, so Komodo Periphery (which runs with that group) can
+  read the build context — **without** widening any base mode or exposing other
+  services. `build add` scaffolds the Dockerfile (Node.js template, won't
+  overwrite) and applies the ACL; `build remove` revokes it and deletes the
+  Dockerfile (`--keep-dockerfile` to keep it). Because the signal is the file
+  itself, `coxyz apply` keeps the ACL in sync automatically. Recommended build
+  invocation (keeps `.env` out of the context):
+
+  ```bash
+  docker build -f /srv/docker/apps/api/config/Dockerfile /srv/docker/apps/api/data
+  ```
 - **`list`**: parses each `compose.yaml` for image/ports and runs an audit
   to show a compliance status.
 - **`dev add/remove/list`**: makes a service editable through code-server.

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from .build import BUILD_PERMS, BUILD_PRINCIPAL, is_build_enabled
 from .config import Config, RuleConfig
 from .dev import acl_enable_cmds
 from .system import (
@@ -208,22 +209,27 @@ def resolve_acl_entries(rule: RuleConfig, config: Config) -> list[NamedAclEntry]
 
 
 def desired_acl(
-    rule: RuleConfig, config: Config, *, dev: DevOverlay | None = None,
+    rule: RuleConfig, config: Config, *,
+    dev: DevOverlay | None = None, build: DevOverlay | None = None,
 ) -> Acl:
     """The :class:`Acl` an ACL-managed path should end up with.
 
-    When ``dev`` is given (a dev-enabled service's ``config/`` or ``data/``), the
-    dev principal's named entry and a default ACL are part of the expected state.
+    Overlays add a recursive named entry plus a default ACL on a service's
+    ``config/``/``data/``: ``dev`` (the ``coxyz dev`` principal, rwX) and
+    ``build`` (the komodo principal granted read access for ``coxyz build``).
+    An overlay's entry overrides any rule entry for the same principal.
     """
     user, group, other = mode_to_perms(rule.mode)
     entries = resolve_acl_entries(rule, config)
     named = {(e.kind, e.name): e.perms for e in entries}
     perms_for_mask = [e.perms for e in entries]
     has_default = False
-    if dev is not None:
-        dev_entry = dev.named_entry()
-        named[(dev_entry.kind, dev_entry.name)] = dev_entry.perms
-        perms_for_mask.append(dev_entry.perms)
+    for overlay in (dev, build):
+        if overlay is None:
+            continue
+        entry = overlay.named_entry()
+        named[(entry.kind, entry.name)] = entry.perms
+        perms_for_mask.append(entry.perms)
         has_default = True
     mask = union_perms(group, *perms_for_mask)
     return Acl(user=user, group=group, other=other,
@@ -435,22 +441,29 @@ def _setfacl_modify_base_cmd(path: Path, rule: RuleConfig, config: Config) -> li
     return ["setfacl", "-m", acl_set_spec(rule, config), str(path)]
 
 
-def _audit_dev_acl(
-    state: PathState, rule: RuleConfig, config: Config, dev: DevOverlay,
+def _audit_overlay_acl(
+    state: PathState, rule: RuleConfig, config: Config,
     issues: list[str], fixes: list[list[str]],
+    *, dev: DevOverlay | None, build: DevOverlay | None,
 ) -> None:
-    """Audit a dev-enabled ``config/``/``data/`` path: base mode + dev ACL + default."""
+    """Audit an overlaid ``config/``/``data/`` path: base mode + overlay ACL(s) + default.
+
+    Overlays: ``dev`` (coxyz dev principal) and/or ``build`` (komodo, for a
+    build-enabled service). Reconciliation is non-destructive — fix the base
+    mode, then (re)grant each overlay recursively with its default ACL, never
+    wiping it with ``--set``/``-b``.
+    """
     if state.acl is None:
         issues.append("could not read acl (getfacl failed)")
         return
-    acl_issues = _diff_acl(state.acl, desired_acl(rule, config, dev=dev))
+    acl_issues = _diff_acl(state.acl, desired_acl(rule, config, dev=dev, build=build))
     if not acl_issues:
         return
     issues.extend(acl_issues)
-    # Reconcile non-destructively: fix the base mode, then (re)grant the dev ACL
-    # recursively with its default — never wiping it with --set/-b.
     fixes.append(_setfacl_modify_base_cmd(state.path, rule, config))
-    fixes.extend(acl_enable_cmds([state.path], dev.kind, dev.name, dev.perms))
+    for overlay in (dev, build):
+        if overlay is not None:
+            fixes.extend(acl_enable_cmds([state.path], overlay.kind, overlay.name, overlay.perms))
 
 
 def _audit_path(
@@ -463,11 +476,13 @@ def _audit_path(
     acl_enabled: bool,
     principals_available: dict[str, bool],
     dev: DevOverlay | None = None,
+    build: DevOverlay | None = None,
 ) -> Finding:
     """Audit a single path against a rule; return a Finding with planned fixes.
 
-    When ``dev`` is set the path belongs to a dev-enabled service, so the dev
-    principal's recursive ACL and a default ACL are expected (not drift).
+    When ``dev``/``build`` are set the path belongs to a dev-/build-enabled
+    service, so that principal's recursive ACL and a default ACL are expected
+    (not drift).
     """
     state = read_state(path)
 
@@ -492,8 +507,8 @@ def _audit_path(
     fixes: list[list[str]] = []
 
     _audit_owner(state, expected_owner, issues, fixes)
-    if dev is not None and acl_enabled:
-        _audit_dev_acl(state, rule, config, dev, issues, fixes)
+    if (dev is not None or build is not None) and acl_enabled:
+        _audit_overlay_acl(state, rule, config, issues, fixes, dev=dev, build=build)
     elif rule.acl is None:
         _audit_plain_mode(state, rule, issues, fixes)
     else:
@@ -525,6 +540,16 @@ def audit_service(
     svc_path = config.root_dir / category / service
     report = ServiceReport(category=category, service=service, path=svc_path)
 
+    # Build-enabled service (carries config/Dockerfile): the komodo principal
+    # gets a recursive read ACL on config/ + data/ so Komodo can read the build
+    # context. Treated like the dev overlay — expected, not drift.
+    build_overlay: DevOverlay | None = None
+    komodo = config.settings.principals.get(BUILD_PRINCIPAL)
+    if (komodo is not None and acl_enabled
+            and principals_available.get(BUILD_PRINCIPAL, False)
+            and is_build_enabled(svc_path)):
+        build_overlay = DevOverlay(kind=komodo.kind, name=komodo.name, perms=BUILD_PERMS)
+
     def add(path: Path, rule_name: str, *, dev_aware: bool = False) -> None:
         if is_excluded_path(config, path):
             return
@@ -534,6 +559,7 @@ def audit_service(
                 path, rule_name, rule, _expected_owner(config, category, rule), config,
                 acl_enabled=acl_enabled, principals_available=principals_available,
                 dev=dev if dev_aware else None,
+                build=build_overlay if dev_aware else None,
             )
         )
 

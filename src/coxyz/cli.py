@@ -32,6 +32,15 @@ from .policy import (
     resolve_service,
 )
 from .scaffold import CreateRequest, create_service, validate_service_name
+from .build import (
+    BUILD_PERMS,
+    BUILD_PRINCIPAL,
+    DOCKERFILE_NAME,
+    build_dirs,
+    dockerfile_path,
+    dockerfile_template,
+    is_build_enabled,
+)
 from .meta import (
     SERVICE_FILENAME,
     ManifestResult,
@@ -1035,6 +1044,183 @@ def dev_list_cmd() -> None:
         else:
             status = Text("missing", style="yellow")
         table.add_row(cat, svc, f"{dev.mount_base}/{cat}/{svc}", status)
+    console.print(table)
+
+
+# ─── build: let a service build its image from a Dockerfile ───────────────────
+
+build_app = typer.Typer(
+    name="build",
+    help="Mark a service as building its own image (config/Dockerfile + komodo read ACL).",
+    no_args_is_help=True,
+)
+app.add_typer(build_app, name="build")
+
+
+def _komodo_principal() -> tuple[str, str]:
+    """Resolve the komodo principal (kind, name) used to read build contexts."""
+    p = ctx.config.settings.principals.get(BUILD_PRINCIPAL)
+    if p is None:
+        err_console.print(
+            f"[red]ERROR[/red] No '{BUILD_PRINCIPAL}' principal in config "
+            "(needed to grant Komodo read access for builds)."
+        )
+        raise typer.Exit(code=2)
+    return p.kind, p.name
+
+
+@build_app.command("add")
+def build_add_cmd(
+    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
+) -> None:
+    """Enable build mode: scaffold config/Dockerfile + grant komodo read on config/ & data/."""
+    _print_runtime_banner()
+    cfg = ctx.config
+
+    try:
+        cat, svc, svc_path = resolve_service(cfg, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    kind, name = _komodo_principal()
+    if not ctx.acl_enabled:
+        err_console.print("[red]ERROR[/red] ACL unsupported on this filesystem.")
+        raise typer.Exit(code=2)
+    if not principal_exists(name, kind):
+        err_console.print(f"[red]ERROR[/red] {kind} '{name}' does not exist on this host.")
+        raise typer.Exit(code=2)
+    if not (svc_path / "config").is_dir():
+        err_console.print(f"[red]ERROR[/red] {cat}/{svc} has no config/ directory.")
+        raise typer.Exit(code=2)
+
+    dirs = build_dirs(svc_path)
+    dfile = dockerfile_path(svc_path)
+    create_dockerfile = not dfile.exists()
+    acl_cmds = acl_enable_cmds(dirs, kind, name, BUILD_PERMS)
+
+    console.print(f"\n[bold]Enable build for {cat}/{svc}[/bold]")
+    if create_dockerfile:
+        console.print(f"  create [cyan]config/{DOCKERFILE_NAME}[/cyan] (template)")
+    else:
+        console.print(f"  [dim](config/{DOCKERFILE_NAME} already present)[/dim]")
+    console.print(f"  grant [cyan]{name}[/cyan] ({kind}, {BUILD_PERMS}, recursive) on:")
+    for d in dirs:
+        console.print(f"    - {d}")
+
+    if dry_run:
+        for cmd in acl_cmds:
+            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nApply?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    if create_dockerfile:
+        from .policy import plan_path  # local import: avoids reshuffling module imports
+        rule = cfg.rule_or_default("service_file")
+        owner = rule.owner or cfg.category(cat).owner_spec
+        runner = CommandRunner(dry_run=False)
+        try:
+            runner.write_file(dfile, dockerfile_template(svc))
+            for cmd in plan_path(
+                dfile, rule, owner, cfg, is_dir=False,
+                acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+            ):
+                runner.run(cmd)
+        except (CommandExecutionError, OSError) as e:
+            err_console.print(f"[red]ERROR[/red] Could not write {dfile}: {e} (run with sudo?)")
+            raise typer.Exit(code=2)
+
+    _run_acl_commands(acl_cmds)
+    console.print(f"\n[green]✓ {cat}/{svc} is now build-enabled.[/green]")
+    console.print(f"  Edit [bold]config/{DOCKERFILE_NAME}[/bold]; build with context = data/:")
+    console.print(f"    [dim]docker build -f {svc_path}/config/{DOCKERFILE_NAME} {svc_path}/data[/dim]")
+
+
+@build_app.command("remove")
+def build_remove_cmd(
+    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
+    keep_dockerfile: Annotated[
+        bool, typer.Option("--keep-dockerfile", help="Revoke ACL but keep config/Dockerfile."),
+    ] = False,
+) -> None:
+    """Disable build mode: revoke komodo's read ACL and remove config/Dockerfile."""
+    _print_runtime_banner()
+    cfg = ctx.config
+
+    try:
+        cat, svc, svc_path = resolve_service(cfg, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    kind, name = _komodo_principal()
+    dirs = build_dirs(svc_path)
+    acl_cmds = acl_disable_cmds(dirs, kind, name) if (ctx.acl_enabled and dirs) else []
+    dfile = dockerfile_path(svc_path)
+    remove_df = dfile.is_file() and not keep_dockerfile
+
+    console.print(f"\n[bold]Disable build for {cat}/{svc}[/bold]")
+    console.print(f"  revoke [cyan]{name}[/cyan] ({kind}) ACL (recursive) on:")
+    for d in dirs:
+        console.print(f"    - {d}")
+    if remove_df:
+        console.print(f"  delete [cyan]config/{DOCKERFILE_NAME}[/cyan]")
+    elif dfile.is_file():
+        console.print(f"  [dim](keeping config/{DOCKERFILE_NAME} — apply will re-enable it)[/dim]")
+
+    if dry_run:
+        for cmd in acl_cmds:
+            console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nApply?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    _run_acl_commands(acl_cmds)
+    if remove_df:
+        try:
+            dfile.unlink()
+        except OSError as e:
+            err_console.print(f"[red]ERROR[/red] Could not delete {dfile}: {e} (run with sudo?)")
+            raise typer.Exit(code=2)
+    console.print(f"\n[green]✓ {cat}/{svc} build mode disabled.[/green]")
+
+
+@build_app.command("list")
+def build_list_cmd() -> None:
+    """List services that build their own image (config/Dockerfile present)."""
+    _print_runtime_banner()
+    cfg = ctx.config
+
+    enabled = [(c, s, p) for c, s, p in list_services(cfg) if is_build_enabled(p)]
+    if not enabled:
+        console.print("[dim]No build-enabled services (none carry config/Dockerfile).[/dim]")
+        raise typer.Exit()
+
+    kind, name = _komodo_principal()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Category")
+    table.add_column("Service")
+    table.add_column("Dockerfile")
+    table.add_column(f"komodo ACL ({name})")
+    for cat, svc, path in enabled:
+        config_dir = path / "config"
+        acl = read_acl(config_dir) if config_dir.is_dir() else None
+        if acl is None:
+            status = Text("—", style="dim")
+        elif (kind, name) in acl.named:
+            status = Text("✓ config", style="green")
+        else:
+            status = Text("missing (run apply)", style="yellow")
+        table.add_row(cat, svc, f"config/{DOCKERFILE_NAME}", status)
     console.print(table)
 
 

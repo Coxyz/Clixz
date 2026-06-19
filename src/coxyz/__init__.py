@@ -1,3 +1,3 @@
 """coxyz — CLI to manage Docker services under /srv/docker."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"

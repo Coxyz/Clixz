@@ -60,6 +60,15 @@ _DEFAULT_DEV = DevConfig(
 )
 
 
+# Built-in rule defaults used when a config predates a newer rule. This keeps
+# coxyz working against an existing /etc/coxyz/config.yaml that has not yet been
+# updated with the rule (e.g. ``service_file`` introduced for ``service.yaml``).
+# ``service.yaml`` is non-sensitive presentation metadata: owner rw, group r.
+_BUILTIN_RULE_DEFAULTS: dict[str, "RuleConfig"] = {
+    "service_file": RuleConfig(mode="640"),
+}
+
+
 @dataclass(frozen=True)
 class Config:
     root_dir: Path
@@ -68,6 +77,7 @@ class Config:
     rules: dict[str, RuleConfig]
     exclude: list[str]
     dev: DevConfig = _DEFAULT_DEV
+    manifest_path: Path | None = None
 
     def category(self, name: str) -> CategoryConfig:
         if name not in self.categories:
@@ -81,6 +91,28 @@ class Config:
         if name not in self.rules:
             raise KeyError(f"Missing rule '{name}' in config")
         return self.rules[name]
+
+    def rule_or_default(self, name: str) -> RuleConfig:
+        """Like :meth:`rule` but falls back to a built-in default when absent.
+
+        Lets newer rules (e.g. ``service_file``) work against an older config.
+        """
+        if name in self.rules:
+            return self.rules[name]
+        if name in _BUILTIN_RULE_DEFAULTS:
+            return _BUILTIN_RULE_DEFAULTS[name]
+        raise KeyError(f"Missing rule '{name}' in config (no built-in default)")
+
+    @property
+    def resolved_manifest_path(self) -> Path:
+        """Where ``coxyz manifest`` writes the aggregated services manifest.
+
+        Defaults to the coxyz-api service's data directory so it can be mounted
+        read-only into the API container.
+        """
+        if self.manifest_path is not None:
+            return self.manifest_path
+        return self.root_dir / "apps" / "api" / "data" / "manifest.json"
 
 
 # ─── Loading ────────────────────────────────────────────────────────────
@@ -206,6 +238,11 @@ def _parse_config(raw: dict) -> Config:
         if not isinstance(exclude_raw, list):
             raise ValueError("exclude must be a list of glob patterns")
 
+        api_raw = raw.get("api")
+        manifest_path: Path | None = None
+        if isinstance(api_raw, dict) and api_raw.get("manifest"):
+            manifest_path = Path(str(api_raw["manifest"]))
+
         return Config(
             root_dir=Path(raw["root_dir"]),
             settings=settings,
@@ -213,6 +250,7 @@ def _parse_config(raw: dict) -> Config:
             rules=rules,
             exclude=[str(p) for p in exclude_raw],
             dev=_parse_dev(raw),
+            manifest_path=manifest_path,
         )
     except KeyError as e:
         raise ValueError(f"Missing required key in config: {e}") from e
@@ -246,7 +284,7 @@ def load_raw_config(source: Path | None) -> dict:
 
 # Top-level keys coxyz understands. Anything else is flagged as a likely typo
 # or a section indented into the wrong place.
-_KNOWN_TOP_LEVEL = {"root_dir", "settings", "komodo", "categories", "rules", "exclude", "dev"}
+_KNOWN_TOP_LEVEL = {"root_dir", "settings", "komodo", "categories", "rules", "exclude", "dev", "api"}
 _REQUIRED_RULES = {
     "category_dir", "service_dir", "compose_file", "config_dir", "data_dir", "env_file",
 }
@@ -320,6 +358,10 @@ def validate_config(raw: dict) -> list[str]:
         names = {p.get("name") for p in principals.values() if isinstance(p, dict)}
         if wanted not in principals and wanted not in names:
             issues.append(f"dev.principal '{wanted}' matches no principal key or name")
+
+    api = raw.get("api")
+    if api is not None and not isinstance(api, dict):
+        issues.append("'api' must be a mapping (e.g. api.manifest: /path/to/manifest.json)")
 
     for k in raw:
         if k not in _KNOWN_TOP_LEVEL:

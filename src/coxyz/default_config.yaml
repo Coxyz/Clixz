@@ -53,6 +53,11 @@ rules:
     acl:
       komodo: "rw"
 
+  # service.yaml — dashboard descriptor (non-sensitive presentation metadata).
+  service_file:
+    mode: "640"
+    acl: null
+
   config_dir:
     mode: "750"
     acl:
@@ -68,6 +73,11 @@ rules:
     owner: "root:root"
     acl: null
     audit_only: true
+
+# `coxyz manifest` aggregates every service.yaml into this JSON file, mounted
+# read-only into the coxyz-api container and served at /api/services.
+api:
+  manifest: /srv/docker/apps/api/data/manifest.json
 
 # `coxyz dev add/remove <service>`: mount a service's config/ and data/ into
 # code-server and grant the `principal` group recursive rw access on them.

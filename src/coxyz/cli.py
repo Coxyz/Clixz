@@ -32,6 +32,13 @@ from .policy import (
     resolve_service,
 )
 from .scaffold import CreateRequest, create_service, validate_service_name
+from .meta import (
+    SERVICE_FILENAME,
+    ManifestResult,
+    build_manifest,
+    manifest_json,
+    scaffold_template,
+)
 from .dev import (
     acl_disable_cmds,
     acl_enable_cmds,
@@ -46,8 +53,10 @@ from .system import (
     CommandRunner,
     check_required_bins,
     detect_acl_support,
+    group_exists,
     principal_exists,
     read_acl,
+    user_exists,
 )
 
 app = typer.Typer(
@@ -390,14 +399,31 @@ def check_cmd(
         total_drift += report.drift_count
         total_warn += report.warn_count
 
+    # Service descriptors (service.yaml) — structural/content validation.
+    manifest_result = build_manifest(ctx.config)
+    if manifest_result.errors or (verbose and manifest_result.warnings):
+        console.print("\n[bold]Service descriptors[/bold]")
+        for e in manifest_result.errors:
+            console.print(f"  [red]✗[/red] {e}")
+        if verbose:
+            for w in manifest_result.warnings:
+                console.print(f"  [magenta]![/magenta] {w}")
+    else:
+        console.print(
+            f"\n[bold]Service descriptors[/bold] "
+            f"[green]✓ {manifest_result.public_count} public, "
+            f"{manifest_result.private_count} private[/green]"
+        )
+
     console.print(
         f"\n[dim]Summary:[/dim] "
         f"[red]{len(config_issues)} config issue(s)[/red], "
+        f"[red]{len(manifest_result.errors)} descriptor error(s)[/red], "
         f"[yellow]{total_drift} drift[/yellow], "
         f"[magenta]{total_warn} warn-only[/magenta]"
     )
 
-    if total_drift > 0 or config_issues:
+    if total_drift > 0 or config_issues or manifest_result.errors:
         raise typer.Exit(code=1)
 
 
@@ -537,7 +563,7 @@ def create_cmd(
     console.print("[bold]Will create:[/bold]")
     console.print(f"  path  : {svc_path}/")
     console.print(f"  owner : {cfg.category(category).owner_spec}")
-    console.print("  files : compose.yaml, .env (empty), config/, data/")
+    console.print("  files : compose.yaml, .env (empty), service.yaml (template), config/, data/")
     console.print()
 
     if not yes and not typer.confirm("Create this service?"):
@@ -559,7 +585,194 @@ def create_cmd(
         console.print(f"  [green]RUN[/green] {' '.join(cmd)}")
 
     console.print(f"\n[green]✓ Created {svc_path}[/green]")
-    console.print(f"  Next: edit {svc_path}/compose.yaml and .env, then deploy.")
+    console.print(
+        f"  Next: edit {svc_path}/compose.yaml, .env and {SERVICE_FILENAME} "
+        "(set public: true to show it on the dashboard), then deploy."
+    )
+
+    # Refresh the dashboard manifest so a public descriptor shows up right away.
+    # Best-effort: a manifest write failure must not fail the create itself.
+    try:
+        result = build_manifest(cfg)
+        _write_manifest(result, dry_run=False)
+        console.print(
+            f"  [dim]Manifest refreshed: {result.public_count} public service(s).[/dim]"
+        )
+    except (CommandExecutionError, OSError) as e:
+        console.print(f"  [magenta]![/magenta] Could not refresh manifest: {e}")
+        console.print("    Run [bold]sudo coxyz manifest[/bold] once permissions allow.")
+
+
+# ─── manifest: aggregate service.yaml descriptors for the API/dashboard ───────
+
+def _manifest_owner() -> Optional[str]:
+    """The owner ``user:group`` the manifest file should carry, or None.
+
+    Derived from the category the manifest lives under (e.g. ``apps`` →
+    ``svc_apps:svc_apps``) so it matches the API service's data directory.
+    """
+    path = ctx.config.resolved_manifest_path
+    try:
+        rel = path.resolve().relative_to(ctx.config.root_dir.resolve())
+    except ValueError:
+        return None
+    cat = rel.parts[0] if rel.parts else None
+    if cat in ctx.config.categories:
+        return ctx.config.category(cat).owner_spec
+    return None
+
+
+def _write_manifest(result: ManifestResult, *, dry_run: bool) -> None:
+    """Write the manifest JSON, then fix its owner/mode (644 so the API can read)."""
+    path = ctx.config.resolved_manifest_path
+    runner = CommandRunner(dry_run=dry_run)
+    if not path.parent.exists():
+        runner.run(["mkdir", "-p", str(path.parent)])
+    runner.write_file(path, manifest_json(result.manifest))
+    owner = _manifest_owner()
+    if owner:
+        user, _, group = owner.partition(":")
+        if user_exists(user) and group_exists(group):
+            runner.run(["chown", owner, str(path)])
+    runner.run(["chmod", "644", str(path)])
+
+
+def _report_manifest_issues(result: ManifestResult) -> None:
+    if result.warnings:
+        console.print(f"\n[magenta]Warnings ({len(result.warnings)}):[/magenta]")
+        for w in result.warnings:
+            console.print(f"  [magenta]![/magenta] {w}")
+    if result.errors:
+        console.print(
+            f"\n[red]Errors ({len(result.errors)}) — invalid descriptors are skipped:[/red]"
+        )
+        for e in result.errors:
+            console.print(f"  [red]✗[/red] {e}")
+
+
+@app.command("manifest")
+def manifest_cmd(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Validate + preview without writing.")
+    ] = False,
+) -> None:
+    """Aggregate every service.yaml into the API manifest (public services only)."""
+    _print_runtime_banner()
+    result = build_manifest(ctx.config)
+    path = ctx.config.resolved_manifest_path
+
+    _report_manifest_issues(result)
+    console.print(
+        f"\n[bold]Manifest[/bold] → {path}\n"
+        f"  [green]{result.public_count} public[/green], "
+        f"[dim]{result.private_count} private (excluded from API)[/dim]"
+    )
+
+    try:
+        _write_manifest(result, dry_run=dry_run)
+    except CommandExecutionError as e:
+        err_console.print("[red]ERROR[/red] Failed to set manifest permissions (run with sudo?).")
+        err_console.print(f"[red]Command[/red]: {' '.join(e.command)}")
+        if e.stderr.strip():
+            err_console.print(f"[red]stderr[/red]:\n{e.stderr.rstrip()}")
+        raise typer.Exit(code=2)
+    except OSError as e:
+        err_console.print(f"[red]ERROR[/red] Could not write {path}: {e} (run with sudo?)")
+        raise typer.Exit(code=2)
+
+    if dry_run:
+        console.print("\n[dim]Dry-run — nothing written.[/dim]")
+    else:
+        console.print(f"\n[green]✓ Wrote manifest ({result.public_count} service(s)).[/green]")
+    if result.errors:
+        raise typer.Exit(code=1)
+
+
+# ─── meta: manage service.yaml descriptors ────────────────────────────────────
+
+meta_app = typer.Typer(
+    name="meta",
+    help="Manage service.yaml dashboard descriptors.",
+    no_args_is_help=True,
+)
+app.add_typer(meta_app, name="meta")
+
+
+@meta_app.command("scaffold")
+def meta_scaffold_cmd(
+    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+) -> None:
+    """Create a service.yaml template in an existing service (won't overwrite)."""
+    _print_runtime_banner()
+    try:
+        cat, svc, svc_path = resolve_service(ctx.config, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    descriptor = svc_path / SERVICE_FILENAME
+    if descriptor.exists():
+        err_console.print(f"[red]ERROR[/red] {descriptor} already exists.")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[bold]Create {cat}/{svc}/{SERVICE_FILENAME}[/bold] (template, public: false)")
+    if not yes and not typer.confirm("Create it?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    rule = ctx.config.rule_or_default("service_file")
+    owner = rule.owner or ctx.config.category(cat).owner_spec
+    runner = CommandRunner(dry_run=False)
+    try:
+        runner.write_file(descriptor, scaffold_template(cat, svc))
+        from .policy import plan_path  # local import: avoids reshuffling module imports
+        for cmd in plan_path(
+            descriptor, rule, owner, ctx.config, is_dir=False,
+            acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+        ):
+            runner.run(cmd)
+    except (CommandExecutionError, OSError) as e:
+        err_console.print(f"[red]ERROR[/red] Could not write {descriptor}: {e} (run with sudo?)")
+        raise typer.Exit(code=2)
+
+    console.print(f"[green]✓ Created {descriptor}[/green]")
+    console.print(f"  Edit it, then run [bold]coxyz manifest[/bold] to publish.")
+
+
+@meta_app.command("validate")
+def meta_validate_cmd(
+    service: Annotated[
+        Optional[str],
+        typer.Argument(help="Limit to one service (default: all)."),
+    ] = None,
+) -> None:
+    """Validate service.yaml descriptors without writing anything."""
+    _print_runtime_banner()
+    result = build_manifest(ctx.config)
+
+    def _keep(line: str) -> bool:
+        return service is None or line.startswith(f"{service}:") or f"/{service}:" in line
+
+    warnings = [w for w in result.warnings if _keep(w)]
+    errors = [e for e in result.errors if _keep(e)]
+
+    if warnings:
+        console.print(f"[magenta]Warnings ({len(warnings)}):[/magenta]")
+        for w in warnings:
+            console.print(f"  [magenta]![/magenta] {w}")
+    if errors:
+        console.print(f"[red]Errors ({len(errors)}):[/red]")
+        for e in errors:
+            console.print(f"  [red]✗[/red] {e}")
+    if not warnings and not errors:
+        console.print("[green]✓ All descriptors valid.[/green]")
+
+    console.print(
+        f"\n[dim]{result.public_count} public, {result.private_count} private.[/dim]"
+    )
+    if errors:
+        raise typer.Exit(code=1)
 
 
 @app.command("show-config")

@@ -528,7 +528,7 @@ def audit_service(
     def add(path: Path, rule_name: str, *, dev_aware: bool = False) -> None:
         if is_excluded_path(config, path):
             return
-        rule = config.rule(rule_name)
+        rule = config.rule_or_default(rule_name)
         report.findings.append(
             _audit_path(
                 path, rule_name, rule, _expected_owner(config, category, rule), config,
@@ -546,6 +546,18 @@ def audit_service(
         report.findings.append(Finding(
             path=compose, rule_name="compose_file", severity=Severity.WARN,
             issues=["compose.yaml not found"],
+        ))
+
+    # service.yaml — dashboard descriptor. Audited for permissions only here;
+    # `coxyz manifest`/`check` validates its *contents*. A missing one is a
+    # soft warning (a service simply won't appear on the dashboard).
+    service_file = svc_path / "service.yaml"
+    if service_file.is_file():
+        add(service_file, "service_file")
+    elif not is_excluded_path(config, service_file):
+        report.findings.append(Finding(
+            path=service_file, rule_name="service_file", severity=Severity.WARN,
+            issues=["service.yaml not found (service hidden from dashboard)"],
         ))
 
     # config/ and data/: only the directory itself, not its contents. When the

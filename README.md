@@ -88,6 +88,11 @@ coxyz apply bitwarden -y
 coxyz create                    # interactive prompts, confirm, then create
 coxyz create -C apps -n myapp -y
 
+coxyz manifest                  # aggregate every service.yaml → API manifest
+coxyz manifest --dry-run        # validate + preview without writing
+coxyz meta scaffold apps/nginx  # add a service.yaml template to an existing service
+coxyz meta validate             # validate all service.yaml descriptors
+
 coxyz dev add apps/nginx        # make a service editable via code-server
 coxyz dev remove apps/nginx     # revoke it
 coxyz dev list                  # show dev-enabled services
@@ -118,8 +123,24 @@ Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
   uses `setfacl --set`/`-b`, which would wipe the dev grant). A leftover dev ACL
   on a service that is *not* dev-enabled is still correctly flagged for removal.
 - **`create`**: scaffolds `<category>/<service>/{config/,data/}` plus **empty**
-  `compose.yaml` and `.env`, with correct owners + perms + ACL. It does not
-  template `compose.yaml` — you fill it in.
+  `compose.yaml` and `.env`, a `service.yaml` template, with correct owners +
+  perms + ACL. It does not template `compose.yaml` — you fill it in. Then it
+  refreshes the dashboard manifest.
+- **`service.yaml`** (dashboard descriptor): a per-service file describing how
+  the service appears on the coxyz dashboard — `name`, `icon`, `description`,
+  `public` (true ⇒ exposed by the API, false ⇒ hidden entirely), optional
+  `url`/`kind`/`container`/`tags`, and a `details:` block (summary, features,
+  internal `ports`, `depends_on`, `tech`). Put only **non-sensitive** info here.
+  Its permissions are governed by the `service_file` rule (default `640`).
+- **`manifest`**: reads every `service.yaml`, validates it, and aggregates the
+  **public** ones into the JSON file at `api.manifest`
+  (default `/srv/docker/apps/api/data/manifest.json`, mode `644`), which the
+  coxyz-api container mounts read-only and serves at `/api/services`. Private
+  descriptors never reach the manifest.
+- **`meta scaffold <service>`**: drops a `service.yaml` template into an existing
+  service (won't overwrite). **`meta validate`**: validates descriptors only.
+- **`check`** also validates every `service.yaml` (a missing one is a warning; a
+  malformed one is an error that fails the check).
 - **`list`**: parses each `compose.yaml` for image/ports and runs an audit
   to show a compliance status.
 - **`dev add/remove/list`**: makes a service editable through code-server.

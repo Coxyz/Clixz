@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
+from .meta import SERVICE_FILENAME, scaffold_template
 from .policy import plan_path
 from .system import CommandRunner, group_exists, user_exists
 
@@ -57,7 +58,7 @@ def create_service(
     runner = CommandRunner(dry_run=dry_run)
 
     def apply_rule(path: Path, rule_name: str, *, is_dir: bool) -> None:
-        rule = config.rule(rule_name)
+        rule = config.rule_or_default(rule_name)
         owner = rule.owner or cat.owner_spec
         for command in plan_path(
             path, rule, owner, config,
@@ -80,5 +81,10 @@ def create_service(
     env_file = svc_path / ".env"
     runner.write_file(env_file, "")
     apply_rule(env_file, "env_file", is_dir=False)
+
+    # service.yaml — dashboard descriptor (template, public: false by default).
+    service_file = svc_path / SERVICE_FILENAME
+    runner.write_file(service_file, scaffold_template(req.category, req.service))
+    apply_rule(service_file, "service_file", is_dir=False)
 
     return runner.executed

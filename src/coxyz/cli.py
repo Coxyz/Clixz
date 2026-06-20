@@ -921,7 +921,13 @@ def show_config_cmd() -> None:
 
     console.print("\n[bold]External dirs[/bold]")
     for label, ext in (("images", cfg.images), ("repos", cfg.repos)):
-        console.print(f"  {label:7} → {ext.dir}  [dim]({ext.owner}, {ext.mode})[/dim]")
+        acl = (
+            ", ".join(f"{principal}:{perms}" for principal, perms in ext.acl.items())
+            if ext.acl else "—"
+        )
+        console.print(
+            f"  {label:7} → {ext.dir}  [dim]({ext.owner}, {ext.mode}, acl={acl})[/dim]"
+        )
 
     console.print(f"\n[bold]Exclude[/bold] ({len(cfg.exclude)})")
     for pattern in cfg.exclude:
@@ -1204,9 +1210,9 @@ app.add_typer(image_app, name="image")
 
 
 def _image_rule() -> RuleConfig:
-    """The owner/mode rule for image build directories (no ACL — world-readable)."""
+    """The owner/mode/ACL rule for image build directories (world-readable by default)."""
     img = ctx.config.images
-    return RuleConfig(mode=img.mode, acl=None, owner=img.owner)
+    return RuleConfig(mode=img.mode, acl=img.acl, owner=img.owner)
 
 
 @image_app.command("add")

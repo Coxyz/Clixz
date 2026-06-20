@@ -168,6 +168,18 @@ Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
     no per-service ACL and **without** touching `/srv/docker` isolation.
   - Configure the locations under the `images:` and `repos:` sections; `check`/
     `apply` then enforce the owner/mode of every `<dir>/<name>` directory.
+  - Optional `acl:` on either section adds named ACL entries on every
+    `<dir>/<name>` directory (same `{ principal: perms }` form as a rule), for
+    when owner/mode alone isn't enough:
+
+    ```yaml
+    repos:
+      dir: /opt/repos
+      owner: "boxyz_dev:boxyz_dev"
+      mode: "775"
+      acl:
+        komodo: "rx"   # grant the komodo principal read+exec via ACL
+    ```
 
   ```bash
   # Build with Komodo (or the CLI): context = the image's own directory.

@@ -614,12 +614,13 @@ def audit_external_dir(
     config: Config, ext: ExternalDirConfig, rule_name: str,
     *, acl_enabled: bool, principals_available: dict[str, bool],
 ) -> list[Finding]:
-    """Audit each subdirectory of an external dir against its owner/mode.
+    """Audit each subdirectory of an external dir against its owner/mode/ACL.
 
-    Plain (no ACL): the dirs are world-readable so Komodo can build, and owned
-    by the dev principal so they stay editable. Contents are left to the dev.
+    By default the dirs are world-readable so Komodo can build, and owned by the
+    dev principal so they stay editable. An optional ``acl`` in the config adds
+    named ACL entries on each subdirectory (resolved like a rule's ACL).
     """
-    rule = RuleConfig(mode=ext.mode, acl=None, owner=ext.owner)
+    rule = RuleConfig(mode=ext.mode, acl=ext.acl, owner=ext.owner)
     return [
         _audit_path(
             child, rule_name, rule, ext.owner, config,

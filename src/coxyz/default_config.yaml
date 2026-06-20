@@ -83,16 +83,24 @@ api:
 # `coxyz image add/remove/list` manages them; `check`/`apply` enforce owner/mode.
 # Owned by the dev principal (editable via code-server), world-readable so
 # Komodo Periphery can read the build context to build.
+# - acl: optional per-principal ACL on each subdirectory (same form as rules),
+#        or null/omitted to skip. Example below grants komodo read+exec.
 images:
   dir: /opt/images
   owner: "boxyz_dev:boxyz_dev"
   mode: "775"
+  acl: null
+  # acl:
+  #   komodo: "rx"
 
 # Source repositories (same convention as images).
 repos:
   dir: /opt/repos
   owner: "boxyz_dev:boxyz_dev"
   mode: "775"
+  acl: null
+  # acl:
+  #   komodo: "rx"
 
 # `coxyz dev add/remove <service>`: mount a service's config/ and data/ into
 # code-server and grant the `principal` group recursive rw access on them.

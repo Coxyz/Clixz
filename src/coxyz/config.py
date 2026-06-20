@@ -74,6 +74,7 @@ class ExternalDirConfig:
     dir: Path
     owner: str = "boxyz_dev:boxyz_dev"   # "user:group" for each subdirectory
     mode: str = "775"                    # group writes (devs), others read (builder)
+    acl: dict[str, AclPerms] | None = None  # optional named ACL, like a rule's
 
 
 _DEFAULT_IMAGES = ExternalDirConfig(dir=Path("/opt/images"))
@@ -193,29 +194,33 @@ def _parse_settings(raw: dict) -> SettingsConfig:
     raise ValueError("Missing required key in config: settings (or legacy komodo)")
 
 
-def _parse_rule_acl(
+def _parse_acl(
     acl_raw: object,
     settings: SettingsConfig,
-    rule_name: str,
+    label: str,
 ) -> dict[str, AclPerms] | None:
+    """Parse a named-ACL mapping (``{principal: perms}``) shared by rules and
+    external dirs. ``label`` is the config path used in error messages, e.g.
+    ``"rules.config_dir"`` or ``"images"``.
+    """
     if acl_raw is None:
         return None
     if isinstance(acl_raw, str):
         if "komodo" not in settings.principals:
-            raise ValueError(f"rules.{rule_name}.acl uses legacy string but no 'komodo' principal")
+            raise ValueError(f"{label}.acl uses legacy string but no 'komodo' principal")
         return {"komodo": acl_raw}
     if not isinstance(acl_raw, dict):
-        raise ValueError(f"rules.{rule_name}.acl must be a mapping or null")
+        raise ValueError(f"{label}.acl must be a mapping or null")
 
     acl: dict[str, AclPerms] = {}
     for principal_name, perms in acl_raw.items():
         if principal_name not in settings.principals:
             raise ValueError(
-                f"rules.{rule_name}.acl references unknown principal '{principal_name}'"
+                f"{label}.acl references unknown principal '{principal_name}'"
             )
         if perms is None:
             raise ValueError(
-                f"rules.{rule_name}.acl.{principal_name} must be a permission string"
+                f"{label}.acl.{principal_name} must be a permission string"
             )
         acl[str(principal_name)] = str(perms)
     return acl
@@ -238,7 +243,9 @@ def _parse_dev(raw: dict) -> DevConfig:
     )
 
 
-def _parse_external_dir(raw: dict, key: str, default: ExternalDirConfig) -> ExternalDirConfig:
+def _parse_external_dir(
+    raw: dict, key: str, default: ExternalDirConfig, settings: SettingsConfig,
+) -> ExternalDirConfig:
     """Parse an optional ``images``/``repos`` section, falling back to defaults."""
     d = raw.get(key)
     if not isinstance(d, dict):
@@ -247,6 +254,7 @@ def _parse_external_dir(raw: dict, key: str, default: ExternalDirConfig) -> Exte
         dir=Path(str(d.get("dir", default.dir))),
         owner=str(d.get("owner", default.owner)),
         mode=str(d.get("mode", default.mode)),
+        acl=_parse_acl(d.get("acl"), settings, key),
     )
 
 
@@ -263,7 +271,7 @@ def _parse_config(raw: dict) -> Config:
         for name, r in raw["rules"].items():
             rules[name] = RuleConfig(
                 mode=str(r["mode"]),
-                acl=_parse_rule_acl(r.get("acl"), settings, name),
+                acl=_parse_acl(r.get("acl"), settings, f"rules.{name}"),
                 owner=r.get("owner"),
                 audit_only=bool(r.get("audit_only", False)),
             )
@@ -284,8 +292,8 @@ def _parse_config(raw: dict) -> Config:
             rules=rules,
             exclude=[str(p) for p in exclude_raw],
             dev=_parse_dev(raw),
-            images=_parse_external_dir(raw, "images", _DEFAULT_IMAGES),
-            repos=_parse_external_dir(raw, "repos", _DEFAULT_REPOS),
+            images=_parse_external_dir(raw, "images", _DEFAULT_IMAGES, settings),
+            repos=_parse_external_dir(raw, "repos", _DEFAULT_REPOS, settings),
             manifest_path=manifest_path,
         )
     except KeyError as e:
@@ -407,9 +415,19 @@ def validate_config(raw: dict) -> list[str]:
         if ext is None:
             continue
         if not isinstance(ext, dict):
-            issues.append(f"'{ext_key}' must be a mapping (dir, owner, mode)")
-        elif not ext.get("dir"):
+            issues.append(f"'{ext_key}' must be a mapping (dir, owner, mode, acl)")
+            continue
+        if not ext.get("dir"):
             issues.append(f"'{ext_key}.dir' is required when '{ext_key}' is set")
+        acl = ext.get("acl")
+        if isinstance(acl, dict):
+            for principal_name in acl:
+                if principal_name not in principals:
+                    issues.append(
+                        f"{ext_key}.acl references unknown principal '{principal_name}'"
+                    )
+        elif acl is not None and not isinstance(acl, str):
+            issues.append(f"'{ext_key}.acl' must be a mapping or null")
 
     for k in raw:
         if k not in _KNOWN_TOP_LEVEL:

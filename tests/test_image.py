@@ -91,8 +91,42 @@ class ExternalDirConfigParsingTests(unittest.TestCase):
         self.assertEqual(cfg.repos.dir, Path("/data/repos"))
         self.assertEqual(cfg.repos.owner, "boxyz_dev:boxyz_dev")  # default
 
+    def test_acl_parsed(self) -> None:
+        raw = dict(self.BASE)
+        raw["images"] = {"dir": "/opt/images", "acl": {"komodo": "rx"}}
+        cfg = _parse_config(raw)
+        self.assertEqual(cfg.images.acl, {"komodo": "rx"})
+        self.assertIsNone(cfg.repos.acl)  # absent -> None
+
+    def test_acl_unknown_principal_raises(self) -> None:
+        raw = dict(self.BASE)
+        raw["repos"] = {"dir": "/opt/repos", "acl": {"nope": "rx"}}
+        with self.assertRaises(ValueError):
+            _parse_config(raw)
+
 
 class AuditExternalDirTests(unittest.TestCase):
+    def test_acl_drift_plans_setfacl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images = root / "images"
+            (images / "myimg").mkdir(parents=True)
+
+            ext = ExternalDirConfig(
+                dir=images, owner=f"{_self_user()}:{_self_group()}", mode="775",
+                acl={"komodo": "rx"},
+            )
+            findings = audit_external_dir(
+                _config(root), ext, "image_dir",
+                acl_enabled=True, principals_available={"komodo": True},
+            )
+            self.assertEqual(len(findings), 1)
+            self.assertIs(findings[0].severity, Severity.DRIFT)
+            self.assertTrue(any("acl entry" in i for i in findings[0].issues))
+            self.assertTrue(
+                any(cmd and cmd[0] == "setfacl" for cmd in findings[0].fixes)
+            )
+
     def test_detects_and_fixes_mode_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

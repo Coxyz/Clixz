@@ -27,9 +27,9 @@ dependencies = [
 release = ["bump-my-version>=0.20"]
 
 [project.urls]
-Homepage = "https://github.com/Ekyoz/Coxyz-CLI"
-Repository = "https://github.com/Ekyoz/Coxyz-CLI"
-Issues = "https://github.com/Ekyoz/Coxyz-CLI/issues"
+Homepage = "https://github.com/Coxyz/Checker"
+Repository = "https://github.com/Coxyz/Checker"
+Issues = "https://github.com/Coxyz/Checker/issues"
 
 [project.scripts]
 coxyz = "coxyz.cli:app"

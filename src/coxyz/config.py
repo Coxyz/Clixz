@@ -75,6 +75,10 @@ class ExternalDirConfig:
     owner: str = "boxyz_dev:boxyz_dev"   # "user:group" for each subdirectory
     mode: str = "775"                    # group writes (devs), others read (builder)
     acl: dict[str, AclPerms] | None = None  # optional named ACL, like a rule's
+    # Optional rule for the build file inside each subdirectory (the Dockerfile,
+    # for images). When set, `image add` applies it and `check`/`apply` enforce
+    # it; when None the Dockerfile keeps its legacy owner/mode and isn't audited.
+    dockerfile: RuleConfig | None = None
 
 
 _DEFAULT_IMAGES = ExternalDirConfig(dir=Path("/opt/images"))
@@ -250,11 +254,20 @@ def _parse_external_dir(
     d = raw.get(key)
     if not isinstance(d, dict):
         return default
+    df_raw = d.get("dockerfile")
+    dockerfile: RuleConfig | None = None
+    if isinstance(df_raw, dict):
+        dockerfile = RuleConfig(
+            mode=str(df_raw.get("mode", "664")),
+            acl=_parse_acl(df_raw.get("acl"), settings, f"{key}.dockerfile"),
+            owner=df_raw.get("owner"),
+        )
     return ExternalDirConfig(
         dir=Path(str(d.get("dir", default.dir))),
         owner=str(d.get("owner", default.owner)),
         mode=str(d.get("mode", default.mode)),
         acl=_parse_acl(d.get("acl"), settings, key),
+        dockerfile=dockerfile,
     )
 
 
@@ -428,6 +441,21 @@ def validate_config(raw: dict) -> list[str]:
                     )
         elif acl is not None and not isinstance(acl, str):
             issues.append(f"'{ext_key}.acl' must be a mapping or null")
+
+        df = ext.get("dockerfile")
+        if df is not None and not isinstance(df, dict):
+            issues.append(f"'{ext_key}.dockerfile' must be a mapping (mode, owner, acl)")
+        elif isinstance(df, dict):
+            df_acl = df.get("acl")
+            if isinstance(df_acl, dict):
+                for principal_name in df_acl:
+                    if principal_name not in principals:
+                        issues.append(
+                            f"{ext_key}.dockerfile.acl references unknown principal "
+                            f"'{principal_name}'"
+                        )
+            elif df_acl is not None and not isinstance(df_acl, str):
+                issues.append(f"'{ext_key}.dockerfile.acl' must be a mapping or null")
 
     for k in raw:
         if k not in _KNOWN_TOP_LEVEL:

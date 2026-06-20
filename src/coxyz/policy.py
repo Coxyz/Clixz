@@ -613,21 +613,33 @@ def list_external_subdirs(ext: ExternalDirConfig) -> list[Path]:
 def audit_external_dir(
     config: Config, ext: ExternalDirConfig, rule_name: str,
     *, acl_enabled: bool, principals_available: dict[str, bool],
+    file_name: str | None = None,
 ) -> list[Finding]:
     """Audit each subdirectory of an external dir against its owner/mode/ACL.
 
     By default the dirs are world-readable so Komodo can build, and owned by the
     dev principal so they stay editable. An optional ``acl`` in the config adds
     named ACL entries on each subdirectory (resolved like a rule's ACL).
+
+    When ``file_name`` is given and the config defines ``ext.dockerfile``, the
+    contained build file (e.g. ``Dockerfile``) is audited too against that rule.
     """
     rule = RuleConfig(mode=ext.mode, acl=ext.acl, owner=ext.owner)
-    return [
-        _audit_path(
+    findings: list[Finding] = []
+    for child in list_external_subdirs(ext):
+        findings.append(_audit_path(
             child, rule_name, rule, ext.owner, config,
             acl_enabled=acl_enabled, principals_available=principals_available,
-        )
-        for child in list_external_subdirs(ext)
-    ]
+        ))
+        if file_name and ext.dockerfile is not None:
+            fpath = child / file_name
+            if fpath.is_file():
+                file_owner = ext.dockerfile.owner or ext.owner
+                findings.append(_audit_path(
+                    fpath, file_name, ext.dockerfile, file_owner, config,
+                    acl_enabled=acl_enabled, principals_available=principals_available,
+                ))
+    return findings
 
 
 # ─── Applying ─────────────────────────────────────────────────────────────────

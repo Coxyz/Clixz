@@ -512,6 +512,7 @@ def check_cmd(
         ext_findings.extend(audit_external_dir(
             ctx.config, ext, f"{label}_dir",
             acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+            file_name=DOCKERFILE_NAME if label == "images" else None,
         ))
     if any(f.severity is not Severity.OK for f in ext_findings) or verbose:
         console.print("\n[bold]External dirs (images / repos)[/bold]")
@@ -589,6 +590,7 @@ def apply_cmd(
             all_findings.extend(audit_external_dir(
                 ctx.config, ext, f"{label}_dir",
                 acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+                file_name=DOCKERFILE_NAME if label == "images" else None,
             ))
 
     drifts = [f for f in all_findings if f.severity is Severity.DRIFT]
@@ -928,6 +930,16 @@ def show_config_cmd() -> None:
         console.print(
             f"  {label:7} → {ext.dir}  [dim]({ext.owner}, {ext.mode}, acl={acl})[/dim]"
         )
+        if ext.dockerfile is not None:
+            df = ext.dockerfile
+            df_acl = (
+                ", ".join(f"{principal}:{perms}" for principal, perms in df.acl.items())
+                if df.acl else "—"
+            )
+            console.print(
+                f"  {'':7}   [dim]dockerfile: {df.owner or ext.owner}, "
+                f"{df.mode}, acl={df_acl}[/dim]"
+            )
 
     console.print(f"\n[bold]Exclude[/bold] ({len(cfg.exclude)})")
     for pattern in cfg.exclude:
@@ -1215,6 +1227,17 @@ def _image_rule() -> RuleConfig:
     return RuleConfig(mode=img.mode, acl=img.acl, owner=img.owner)
 
 
+def _dockerfile_rule() -> RuleConfig:
+    """The rule for the Dockerfile inside each image dir.
+
+    Uses the configured ``images.dockerfile`` rule when present (so it can carry
+    a custom ACL); otherwise the legacy default (owner = images owner, mode 664,
+    no ACL).
+    """
+    img = ctx.config.images
+    return img.dockerfile or RuleConfig(mode="664", acl=None, owner=img.owner)
+
+
 @image_app.command("add")
 def image_add_cmd(
     name: Annotated[str, typer.Argument(help="Image name (directory under the images dir).")],
@@ -1244,13 +1267,19 @@ def image_add_cmd(
         acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
     )
     dfile = path / DOCKERFILE_NAME
+    df_rule = _dockerfile_rule()
+    df_owner = df_rule.owner or img.owner
+    df_cmds = plan_path(
+        dfile, df_rule, df_owner, ctx.config, is_dir=False,
+        acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+    )
 
     console.print(f"\n[bold]Create image build context[/bold] {path}/")
     console.print(f"  owner : {img.owner}    mode : {img.mode}")
-    console.print(f"  files : {DOCKERFILE_NAME} (template)")
+    console.print(f"  files : {DOCKERFILE_NAME} (template, {df_owner}, mode {df_rule.mode})")
 
     if dry_run:
-        for cmd in dir_cmds:
+        for cmd in (*dir_cmds, *df_cmds):
             console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
         console.print("\n[dim]Dry-run — nothing changed.[/dim]")
         raise typer.Exit()
@@ -1263,10 +1292,8 @@ def image_add_cmd(
         for cmd in dir_cmds:
             runner.run(cmd)
         runner.write_file(dfile, dockerfile_template(name))
-        user, _, group = img.owner.partition(":")
-        if user_exists(user) and group_exists(group):
-            runner.run(["chown", img.owner, str(dfile)])
-        runner.run(["chmod", "664", str(dfile)])
+        for cmd in df_cmds:
+            runner.run(cmd)
     except (CommandExecutionError, OSError) as e:
         err_console.print(f"[red]ERROR[/red] Could not create {path}: {e} (run with sudo?)")
         raise typer.Exit(code=2)
@@ -1328,8 +1355,16 @@ def image_list_cmd() -> None:
         for f in audit_external_dir(
             ctx.config, img, "image_dir",
             acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+            file_name=DOCKERFILE_NAME,
         )
     }
+
+    def _perms_cell(f: Optional[Finding]) -> Text:
+        if f is None or f.severity is Severity.OK:
+            return Text("✓ ok", style="green")
+        if f.severity is Severity.DRIFT:
+            return Text("✗ drift", style="yellow")
+        return Text("! " + f.severity.value, style="magenta")
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("Image")
@@ -1337,18 +1372,12 @@ def image_list_cmd() -> None:
     table.add_column("Perms")
     for path in subs:
         has_df = (path / DOCKERFILE_NAME).is_file()
-        f = findings.get(path)
-        if f is None or f.severity is Severity.OK:
-            perms = Text("✓ ok", style="green")
-        elif f.severity is Severity.DRIFT:
-            perms = Text("✗ drift", style="yellow")
+        if not has_df:
+            dockerfile = Text("—", style="dim")
         else:
-            perms = Text("! " + f.severity.value, style="magenta")
-        table.add_row(
-            path.name,
-            Text("✓", style="green") if has_df else Text("—", style="dim"),
-            perms,
-        )
+            df_finding = findings.get(path / DOCKERFILE_NAME)
+            dockerfile = Text("✓", style="green") if df_finding is None else _perms_cell(df_finding)
+        table.add_row(path.name, dockerfile, _perms_cell(findings.get(path)))
     console.print(table)
 
 

@@ -4,7 +4,7 @@ name: Publish to PyPI
 # Authentication uses PyPI Trusted Publishing (OIDC) — no API token needed.
 # One-time setup on PyPI — add a Trusted Publisher with:
 #   PyPI project name: coxyz-cli   (must match `name` in pyproject.toml)
-#   Owner: Ekyoz   Repository: Coxyz-CLI   Workflow: publish.yml   Environment: (blank)
+#   Owner: Coxyz   Repository: Checker   Workflow: publish.yml   Environment: (blank)
 
 on:
   push:

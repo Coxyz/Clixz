@@ -104,6 +104,24 @@ class ExternalDirConfigParsingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _parse_config(raw)
 
+    def test_dockerfile_rule_parsed(self) -> None:
+        raw = dict(self.BASE)
+        raw["images"] = {
+            "dir": "/opt/images",
+            "dockerfile": {"mode": "664", "acl": {"komodo": "r"}},
+        }
+        cfg = _parse_config(raw)
+        self.assertIsNotNone(cfg.images.dockerfile)
+        self.assertEqual(cfg.images.dockerfile.mode, "664")
+        self.assertEqual(cfg.images.dockerfile.acl, {"komodo": "r"})
+        self.assertIsNone(cfg.repos.dockerfile)  # absent -> None
+
+    def test_dockerfile_acl_unknown_principal_raises(self) -> None:
+        raw = dict(self.BASE)
+        raw["images"] = {"dir": "/opt/images", "dockerfile": {"acl": {"nope": "r"}}}
+        with self.assertRaises(ValueError):
+            _parse_config(raw)
+
 
 class AuditExternalDirTests(unittest.TestCase):
     def test_acl_drift_plans_setfacl(self) -> None:
@@ -126,6 +144,37 @@ class AuditExternalDirTests(unittest.TestCase):
             self.assertTrue(
                 any(cmd and cmd[0] == "setfacl" for cmd in findings[0].fixes)
             )
+
+    def test_dockerfile_audited_only_with_file_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images = root / "images"
+            (images / "myimg").mkdir(parents=True)
+            (images / "myimg" / "Dockerfile").write_text("FROM scratch\n")
+
+            ext = ExternalDirConfig(
+                dir=images, owner=f"{_self_user()}:{_self_group()}", mode="775",
+                dockerfile=RuleConfig(mode="664", acl={"komodo": "r"}),
+            )
+            cfg = _config(root)
+
+            # Without file_name: the Dockerfile is left alone (one finding: the dir).
+            dir_only = audit_external_dir(
+                cfg, ext, "image_dir",
+                acl_enabled=True, principals_available={"komodo": True},
+            )
+            self.assertEqual(len(dir_only), 1)
+
+            # With file_name: the Dockerfile is audited and its ACL drift planned.
+            withf = audit_external_dir(
+                cfg, ext, "image_dir",
+                acl_enabled=True, principals_available={"komodo": True},
+                file_name="Dockerfile",
+            )
+            df = [f for f in withf if f.path.name == "Dockerfile"]
+            self.assertEqual(len(df), 1)
+            self.assertIs(df[0].severity, Severity.DRIFT)
+            self.assertTrue(any(cmd and cmd[0] == "setfacl" for cmd in df[0].fixes))
 
     def test_detects_and_fixes_mode_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

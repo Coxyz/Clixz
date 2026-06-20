@@ -85,6 +85,9 @@ api:
 # Komodo Periphery can read the build context to build.
 # - acl: optional per-principal ACL on each subdirectory (same form as rules),
 #        or null/omitted to skip. Example below grants komodo read+exec.
+# - dockerfile: optional rule (mode/owner/acl) for the Dockerfile inside each
+#        image dir. When set, `image add` applies it and `check`/`apply` enforce
+#        it; when omitted the Dockerfile keeps mode 664 and is not audited.
 images:
   dir: /opt/images
   owner: "boxyz_dev:boxyz_dev"
@@ -92,6 +95,10 @@ images:
   acl: null
   # acl:
   #   komodo: "rx"
+  # dockerfile:
+  #   mode: "664"
+  #   acl:
+  #     komodo: "r"
 
 # Source repositories (same convention as images).
 repos:

@@ -10,7 +10,10 @@ tool driven by a YAML configuration.
 
 coxyz is published on PyPI as the [`coxyz-cli`](https://pypi.org/project/coxyz-cli/)
 package — the installed command stays `coxyz`. It needs root for most operations
-(`chown` / `setfacl`), so install it **system-wide** and run it with `sudo`.
+(`chown` / `setfacl`), so install it **system-wide**. Commands that need root
+re-exec themselves through `sudo` automatically — you no longer have to prefix
+them yourself (set `COXYZ_NO_SUDO=1` to opt out, e.g. in containers running as
+root).
 
 ```bash
 sudo apt install -y pipx
@@ -25,7 +28,7 @@ sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install coxyz-cli
 Then run:
 
 ```bash
-sudo coxyz check
+coxyz check
 ```
 
 Optionally enable shell completion for your user (no sudo):
@@ -33,6 +36,10 @@ Optionally enable shell completion for your user (no sudo):
 ```bash
 coxyz --install-completion
 ```
+
+Once installed, completion suggests service names for commands that take a
+service argument (`check`, `apply`, `dev add/remove`, `meta scaffold/validate`),
+categories for `-C/--category`, and existing images for `image remove`.
 
 ### Update
 
@@ -61,7 +68,7 @@ install.)
 
 ```bash
 coxyz show-config       # inspect the resolved config
-sudo coxyz edit         # create/edit /etc/coxyz/config.yaml (seeded from defaults)
+coxyz edit              # create/edit /etc/coxyz/config.yaml (seeded from defaults)
 ```
 
 Example excludes in `config.yaml`:
@@ -105,7 +112,9 @@ coxyz show-config               # print resolved config
 coxyz edit                      # edit /etc/coxyz/config.yaml
 ```
 
-Most operations require root (`chown` / `setfacl`), so prefix with `sudo`.
+Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
+`sudo` automatically when needed, so the examples above work without a prefix
+(use `COXYZ_NO_SUDO=1` to disable auto-elevation).
 
 ## How it works
 

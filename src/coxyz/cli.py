@@ -85,6 +85,87 @@ class Ctx:
 ctx = Ctx()
 
 
+# ─── Privilege elevation ──────────────────────────────────────────────────────
+
+def ensure_root() -> None:
+    """Re-exec the current invocation under ``sudo`` when not already root.
+
+    Mutating commands chown/chmod/setfacl under the root dir and write into
+    system locations (``/srv/docker``, ``/etc/coxyz``), all of which need root.
+    Rather than make the user remember to prefix every call with ``sudo``, we
+    transparently re-exec the exact same command through sudo. A no-op when
+    already running as root, or when ``COXYZ_NO_SUDO`` is set (for containers,
+    CI, or users who'd rather manage elevation themselves).
+    """
+    if os.geteuid() == 0 or os.environ.get("COXYZ_NO_SUDO"):
+        return
+    if shutil.which("sudo") is None:
+        err_console.print(
+            "[red]ERROR[/red] This command needs root privileges and 'sudo' "
+            "was not found. Re-run as root."
+        )
+        raise typer.Exit(code=2)
+    # Resolve argv[0] to an absolute path so sudo's reduced PATH still finds it,
+    # then re-exec through the *same* interpreter. --preserve-env=EDITOR keeps
+    # `coxyz edit` opening the user's editor across the privilege boundary.
+    script = sys.argv[0]
+    if not os.path.isabs(script):
+        script = shutil.which(script) or os.path.abspath(script)
+    console.print("[dim]Elevating privileges with sudo…[/dim]")
+    try:
+        os.execvp(
+            "sudo",
+            ["sudo", "--preserve-env=EDITOR", sys.executable, script, *sys.argv[1:]],
+        )
+    except OSError as e:  # pragma: no cover - exec failure is environment-specific
+        err_console.print(f"[red]ERROR[/red] Failed to elevate via sudo: {e}")
+        raise typer.Exit(code=2)
+
+
+# ─── Shell completion ─────────────────────────────────────────────────────────
+
+def _complete_service(incomplete: str) -> list[tuple[str, str]]:
+    """Complete service arguments: bare names and ``category/service`` forms.
+
+    Runs in a separate completion invocation (the command callbacks are not
+    executed), so it loads the config independently. Any failure yields no
+    suggestions rather than breaking the user's shell.
+    """
+    try:
+        cfg, _ = load_config(None)
+    except Exception:  # noqa: BLE001 - completion must never raise
+        return []
+    items: list[tuple[str, str]] = []
+    for cat, svc, _ in list_services(cfg):
+        full = f"{cat}/{svc}"
+        if svc.startswith(incomplete):
+            items.append((svc, full))
+        if full.startswith(incomplete):
+            items.append((full, "service"))
+    return items
+
+
+def _complete_category(incomplete: str) -> list[str]:
+    """Complete category options from the configured categories."""
+    try:
+        cfg, _ = load_config(None)
+    except Exception:  # noqa: BLE001 - completion must never raise
+        return []
+    return [c for c in sorted(cfg.categories) if c.startswith(incomplete)]
+
+
+def _complete_image(incomplete: str) -> list[str]:
+    """Complete image names from existing build contexts under the images dir."""
+    try:
+        cfg, _ = load_config(None)
+    except Exception:  # noqa: BLE001 - completion must never raise
+        return []
+    return [
+        p.name for p in list_external_subdirs(cfg.images)
+        if p.name.startswith(incomplete)
+    ]
+
+
 def _version_callback(value: bool) -> None:
     if value:
         console.print(f"coxyz {__version__}")
@@ -273,7 +354,10 @@ def _parse_compose_summary(compose_path: Path) -> tuple[str, list[str]]:
 def list_cmd(
     category: Annotated[
         Optional[str],
-        typer.Option("--category", "-C", help="Filter by category."),
+        typer.Option(
+            "--category", "-C", help="Filter by category.",
+            autocompletion=_complete_category,
+        ),
     ] = None,
 ) -> None:
     """List services with image, ports, and compliance status."""
@@ -335,7 +419,10 @@ def list_cmd(
 def check_cmd(
     service: Annotated[
         Optional[str],
-        typer.Argument(help="Service name (e.g. 'bitwarden' or 'apps/bitwarden'). Default: all."),
+        typer.Argument(
+            help="Service name (e.g. 'bitwarden' or 'apps/bitwarden'). Default: all.",
+            autocompletion=_complete_service,
+        ),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show OK findings too.")] = False,
 ) -> None:
@@ -450,11 +537,15 @@ def check_cmd(
 def apply_cmd(
     service: Annotated[
         Optional[str],
-        typer.Argument(help="Service name. Default: all."),
+        typer.Argument(
+            help="Service name. Default: all.",
+            autocompletion=_complete_service,
+        ),
     ] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")] = False,
 ) -> None:
     """Apply correct permissions/ACL to services after confirmation."""
+    ensure_root()
     _print_runtime_banner()
 
     if service:
@@ -547,7 +638,10 @@ def apply_cmd(
 def create_cmd(
     category: Annotated[
         Optional[str],
-        typer.Option("--category", "-C", help="Service category."),
+        typer.Option(
+            "--category", "-C", help="Service category.",
+            autocompletion=_complete_category,
+        ),
     ] = None,
     name: Annotated[
         Optional[str],
@@ -559,6 +653,7 @@ def create_cmd(
     ] = False,
 ) -> None:
     """Scaffold a new service: directories + empty compose.yaml and .env."""
+    ensure_root()
     _print_runtime_banner()
 
     cfg = ctx.config
@@ -627,7 +722,7 @@ def create_cmd(
         )
     except (CommandExecutionError, OSError) as e:
         console.print(f"  [magenta]![/magenta] Could not refresh manifest: {e}")
-        console.print("    Run [bold]sudo coxyz manifest[/bold] once permissions allow.")
+        console.print("    Run [bold]coxyz manifest[/bold] once permissions allow.")
 
 
 # ─── manifest: aggregate service.yaml descriptors for the API/dashboard ───────
@@ -684,6 +779,8 @@ def manifest_cmd(
     ] = False,
 ) -> None:
     """Aggregate every service.yaml into the API manifest (public services only)."""
+    if not dry_run:
+        ensure_root()
     _print_runtime_banner()
     result = build_manifest(ctx.config)
     path = ctx.config.resolved_manifest_path
@@ -727,10 +824,17 @@ app.add_typer(meta_app, name="meta")
 
 @meta_app.command("scaffold")
 def meta_scaffold_cmd(
-    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    service: Annotated[
+        str,
+        typer.Argument(
+            help="Service ('category/service' or unique name).",
+            autocompletion=_complete_service,
+        ),
+    ],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
 ) -> None:
     """Create a service.yaml template in an existing service (won't overwrite)."""
+    ensure_root()
     _print_runtime_banner()
     try:
         cat, svc, svc_path = resolve_service(ctx.config, service)
@@ -771,7 +875,10 @@ def meta_scaffold_cmd(
 def meta_validate_cmd(
     service: Annotated[
         Optional[str],
-        typer.Argument(help="Limit to one service (default: all)."),
+        typer.Argument(
+            help="Limit to one service (default: all).",
+            autocompletion=_complete_service,
+        ),
     ] = None,
 ) -> None:
     """Validate service.yaml descriptors without writing anything."""
@@ -843,6 +950,7 @@ def show_config_cmd() -> None:
 @app.command("edit")
 def edit_cmd() -> None:
     """Edit the main configuration file."""
+    ensure_root()
     cfg_path = Path("/etc/coxyz/config.yaml")
     if not cfg_path.exists():
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -928,11 +1036,19 @@ def _run_acl_commands(commands: list[list[str]]) -> None:
 
 @dev_app.command("add")
 def dev_add_cmd(
-    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    service: Annotated[
+        str,
+        typer.Argument(
+            help="Service ('category/service' or unique name).",
+            autocompletion=_complete_service,
+        ),
+    ],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
 ) -> None:
     """Enable a service for editing in code-server."""
+    if not dry_run:
+        ensure_root()
     _print_runtime_banner()
     cfg, dev = ctx.config, ctx.config.dev
 
@@ -989,11 +1105,19 @@ def dev_add_cmd(
 
 @dev_app.command("remove")
 def dev_remove_cmd(
-    service: Annotated[str, typer.Argument(help="Service ('category/service' or unique name).")],
+    service: Annotated[
+        str,
+        typer.Argument(
+            help="Service ('category/service' or unique name).",
+            autocompletion=_complete_service,
+        ),
+    ],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
 ) -> None:
     """Disable a service: revoke its dev ACL and unmount it from code-server."""
+    if not dry_run:
+        ensure_root()
     _print_runtime_banner()
     cfg, dev = ctx.config, ctx.config.dev
 
@@ -1092,6 +1216,8 @@ def image_add_cmd(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
 ) -> None:
     """Scaffold a self-built image build context: dir + owner/mode + Dockerfile."""
+    if not dry_run:
+        ensure_root()
     _print_runtime_banner()
     img = ctx.config.images
 
@@ -1146,10 +1272,17 @@ def image_add_cmd(
 
 @image_app.command("remove")
 def image_remove_cmd(
-    name: Annotated[str, typer.Argument(help="Image name (directory under the images dir).")],
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Image name (directory under the images dir).",
+            autocompletion=_complete_image,
+        ),
+    ],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
 ) -> None:
     """Delete an image build context directory (and ALL its contents)."""
+    ensure_root()
     _print_runtime_banner()
     img = ctx.config.images
     path = img.dir / name

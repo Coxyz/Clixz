@@ -81,6 +81,7 @@ class ApplyFailureDisplayTests(unittest.TestCase):
 
             stderr = io.StringIO()
             with (
+                patch("coxyz.cli.ensure_root"),
                 patch("coxyz.cli.resolve_service", return_value=("apps", "svc", Path(tmp))),
                 patch("coxyz.cli.audit_category", return_value=Finding(Path(tmp), "category_dir", Severity.OK)),
                 patch("coxyz.cli.audit_service", return_value=report),

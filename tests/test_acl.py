@@ -122,7 +122,7 @@ class AclFixPlanningTests(unittest.TestCase):
 
 
 class RecursiveAclTests(unittest.TestCase):
-    """`recursive: true` propagates a rule's named ACL to existing children."""
+    """`recursive: true` propagates a rule's owner, mode and ACL to existing children."""
 
     def _config_with_recursive_config_dir(self, root: Path) -> Config:
         cfg = _make_config(root, _self_user(), _self_group())
@@ -153,6 +153,37 @@ class RecursiveAclTests(unittest.TestCase):
             kinds = [cmd[:2] for cmd in config_finding.fixes if cmd[0] == "setfacl"]
             self.assertIn(["setfacl", "-R"], kinds)
             self.assertIn(["setfacl", "-dR"], kinds)
+            self.assertTrue(
+                any(cmd[:2] == ["chown", "-R"] for cmd in config_finding.fixes),
+                "recursive must also reapply owner to existing children",
+            )
+            self.assertFalse(
+                any(cmd[0] == "chmod" for cmd in config_finding.fixes),
+                "an ACL-managed recursive fix must never chmod (would clobber the mask)",
+            )
+
+    def test_recursive_rule_without_acl_uses_chmod_dash_r(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = _make_config(root, _self_user(), _self_group())
+            rules = dict(cfg.rules)
+            rules["config_dir"] = RuleConfig(mode="750", recursive=True)
+            cfg = Config(
+                root_dir=cfg.root_dir, settings=cfg.settings, categories=cfg.categories,
+                rules=rules, exclude=cfg.exclude,
+            )
+            svc = root / "apps" / "svc"
+            (svc / "config").mkdir(parents=True, mode=0o700)
+            (svc / "data").mkdir()
+            (svc / "compose.yaml").write_text("services: {}\n")
+
+            report = audit_service(
+                cfg, "apps", "svc", acl_enabled=True,
+                principals_available={"komodo": True},
+            )
+            config_finding = next(f for f in report.findings if f.rule_name == "config_dir")
+            self.assertIs(Severity.DRIFT, config_finding.severity)
+            self.assertIn(["chmod", "-R", "750", str(svc / "config")], config_finding.fixes)
 
     def test_non_recursive_rule_has_no_dash_r_fix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

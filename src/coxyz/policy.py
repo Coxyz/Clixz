@@ -275,22 +275,32 @@ def _setfacl_set_cmd(path: Path, rule: RuleConfig, config: Config) -> list[str]:
     return ["setfacl", "-k", "--set", acl_set_spec(rule, config), str(path)]
 
 
-def _recursive_acl_cmds(path: Path, rule: RuleConfig, config: Config) -> list[list[str]]:
-    """(Re)apply a rule's named ACL entries to a directory's existing contents.
+def _recursive_cmds(
+    path: Path, rule: RuleConfig, expected_owner: str, config: Config,
+) -> list[list[str]]:
+    """(Re)apply a rule's owner, mode and ACL to a directory's existing contents.
 
-    Only the named entries are propagated (like the ``dev``/``build`` overlays)
-    — never the base ``u::``/``g::``/``o::`` mode, which is a property of each
-    child, not something to inherit from its parent. A default ACL is set too
-    so files created later automatically pick up the same entries.
+    Owner is propagated with a plain ``chown -R``. For the mode/ACL, every
+    child gets the exact same ``setfacl --set`` used on the directory itself
+    (base entries + named entries in one shot) rather than a ``chmod -R`` —
+    running ``chmod`` after ``setfacl`` would rewrite the ACL *mask* instead
+    of the group bits, silently shrinking named entries (see module
+    docstring). When the rule has no ACL, ``chmod -R`` is safe since there is
+    no mask to protect. A default ACL is set too so files created later
+    automatically pick up the same named entries.
     """
+    cmds: list[list[str]] = []
+    if not _owner_resolution_error(expected_owner):
+        cmds.append(["chown", "-R", expected_owner, str(path)])
+
     entries = resolve_acl_entries(rule, config)
-    if not entries:
-        return []
-    tokens = ",".join(e.token for e in entries)
-    return [
-        ["setfacl", "-R", "-m", tokens, str(path)],
-        ["setfacl", "-dR", "-m", tokens, str(path)],
-    ]
+    if entries:
+        cmds.append(["setfacl", "-R", "--set", acl_set_spec(rule, config), str(path)])
+        tokens = ",".join(e.token for e in entries)
+        cmds.append(["setfacl", "-dR", "-m", tokens, str(path)])
+    else:
+        cmds.append(["chmod", "-R", rule.mode, str(path)])
+    return cmds
 
 
 def plan_path(
@@ -446,8 +456,6 @@ def _audit_acl(
         issues.extend(acl_issues)
     # A single setfacl --set fixes the mode, every named entry and the mask.
     fixes.append(_setfacl_set_cmd(state.path, rule, config))
-    if rule.recursive and state.is_dir:
-        fixes.extend(_recursive_acl_cmds(state.path, rule, config))
 
 
 def _setfacl_modify_base_cmd(path: Path, rule: RuleConfig, config: Config) -> list[str]:
@@ -526,13 +534,17 @@ def _audit_path(
     fixes: list[list[str]] = []
 
     _audit_owner(state, expected_owner, issues, fixes)
-    if (dev is not None or build is not None) and acl_enabled:
+    is_overlay = (dev is not None or build is not None) and acl_enabled
+    if is_overlay:
         _audit_overlay_acl(state, rule, config, issues, fixes, dev=dev, build=build)
     elif rule.acl is None:
         _audit_plain_mode(state, rule, issues, fixes)
     else:
         _audit_acl(state, rule, config, issues, fixes,
                    acl_enabled=acl_enabled, principals_available=principals_available)
+
+    if not is_overlay and rule.recursive and state.is_dir and issues:
+        fixes.extend(_recursive_cmds(state.path, rule, expected_owner, config))
 
     if not issues:
         return Finding(path, rule_name, Severity.OK)

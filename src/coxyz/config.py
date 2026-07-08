@@ -42,9 +42,9 @@ class RuleConfig:
     acl: dict[str, AclPerms] | None = None
     owner: str | None = None  # "user:group" override; None = use category owner
     audit_only: bool = False
-    # When True, each named ACL entry is also (re)applied recursively to the
-    # directory's existing contents, plus as a default ACL so new children
-    # inherit it. Only meaningful alongside `acl`; ignored on files.
+    # When True, owner, mode and each named ACL entry are also (re)applied
+    # recursively to the directory's existing contents, plus as a default ACL
+    # so new children inherit the ACL entries too. Ignored on files.
     recursive: bool = False
 
 
@@ -79,7 +79,7 @@ class ExternalDirConfig:
     owner: str = "boxyz_dev:boxyz_dev"   # "user:group" for each subdirectory
     mode: str = "775"                    # group writes (devs), others read (builder)
     acl: dict[str, AclPerms] | None = None  # optional named ACL, like a rule's
-    recursive: bool = False  # apply `acl` recursively to existing subdir contents
+    recursive: bool = False  # apply owner/mode/`acl` recursively to existing subdir contents
     # Optional rule for the build file inside each subdirectory (the Dockerfile,
     # for images). When set, `image add` applies it and `check`/`apply` enforce
     # it; when None the Dockerfile keeps its legacy owner/mode and isn't audited.

@@ -927,8 +927,9 @@ def show_config_cmd() -> None:
             ", ".join(f"{principal}:{perms}" for principal, perms in ext.acl.items())
             if ext.acl else "—"
         )
+        recursive = ", recursive" if ext.recursive else ""
         console.print(
-            f"  {label:7} → {ext.dir}  [dim]({ext.owner}, {ext.mode}, acl={acl})[/dim]"
+            f"  {label:7} → {ext.dir}  [dim]({ext.owner}, {ext.mode}, acl={acl}{recursive})[/dim]"
         )
         if ext.dockerfile is not None:
             df = ext.dockerfile
@@ -936,9 +937,10 @@ def show_config_cmd() -> None:
                 ", ".join(f"{principal}:{perms}" for principal, perms in df.acl.items())
                 if df.acl else "—"
             )
+            df_recursive = ", recursive" if df.recursive else ""
             console.print(
                 f"  {'':7}   [dim]dockerfile: {df.owner or ext.owner}, "
-                f"{df.mode}, acl={df_acl}[/dim]"
+                f"{df.mode}, acl={df_acl}{df_recursive}[/dim]"
             )
 
     console.print(f"\n[bold]Exclude[/bold] ({len(cfg.exclude)})")

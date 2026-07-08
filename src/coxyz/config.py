@@ -42,6 +42,10 @@ class RuleConfig:
     acl: dict[str, AclPerms] | None = None
     owner: str | None = None  # "user:group" override; None = use category owner
     audit_only: bool = False
+    # When True, each named ACL entry is also (re)applied recursively to the
+    # directory's existing contents, plus as a default ACL so new children
+    # inherit it. Only meaningful alongside `acl`; ignored on files.
+    recursive: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,7 @@ class ExternalDirConfig:
     owner: str = "boxyz_dev:boxyz_dev"   # "user:group" for each subdirectory
     mode: str = "775"                    # group writes (devs), others read (builder)
     acl: dict[str, AclPerms] | None = None  # optional named ACL, like a rule's
+    recursive: bool = False  # apply `acl` recursively to existing subdir contents
     # Optional rule for the build file inside each subdirectory (the Dockerfile,
     # for images). When set, `image add` applies it and `check`/`apply` enforce
     # it; when None the Dockerfile keeps its legacy owner/mode and isn't audited.
@@ -261,12 +266,14 @@ def _parse_external_dir(
             mode=str(df_raw.get("mode", "664")),
             acl=_parse_acl(df_raw.get("acl"), settings, f"{key}.dockerfile"),
             owner=df_raw.get("owner"),
+            recursive=bool(df_raw.get("recursive", False)),
         )
     return ExternalDirConfig(
         dir=Path(str(d.get("dir", default.dir))),
         owner=str(d.get("owner", default.owner)),
         mode=str(d.get("mode", default.mode)),
         acl=_parse_acl(d.get("acl"), settings, key),
+        recursive=bool(d.get("recursive", False)),
         dockerfile=dockerfile,
     )
 
@@ -287,6 +294,7 @@ def _parse_config(raw: dict) -> Config:
                 acl=_parse_acl(r.get("acl"), settings, f"rules.{name}"),
                 owner=r.get("owner"),
                 audit_only=bool(r.get("audit_only", False)),
+                recursive=bool(r.get("recursive", False)),
             )
 
         exclude_raw = raw.get("exclude", [])
@@ -406,6 +414,8 @@ def validate_config(raw: dict) -> list[str]:
         for name, r in rules.items():
             if not isinstance(r, dict) or "mode" not in r:
                 issues.append(f"rules.{name} is missing 'mode'")
+            elif "recursive" in r and not isinstance(r["recursive"], bool):
+                issues.append(f"'rules.{name}.recursive' must be true or false")
         missing = _REQUIRED_RULES - set(rules)
         if missing:
             issues.append(f"missing required rule(s): {', '.join(sorted(missing))}")
@@ -441,6 +451,8 @@ def validate_config(raw: dict) -> list[str]:
                     )
         elif acl is not None and not isinstance(acl, str):
             issues.append(f"'{ext_key}.acl' must be a mapping or null")
+        if "recursive" in ext and not isinstance(ext["recursive"], bool):
+            issues.append(f"'{ext_key}.recursive' must be true or false")
 
         df = ext.get("dockerfile")
         if df is not None and not isinstance(df, dict):
@@ -456,6 +468,8 @@ def validate_config(raw: dict) -> list[str]:
                         )
             elif df_acl is not None and not isinstance(df_acl, str):
                 issues.append(f"'{ext_key}.dockerfile.acl' must be a mapping or null")
+            if "recursive" in df and not isinstance(df["recursive"], bool):
+                issues.append(f"'{ext_key}.dockerfile.recursive' must be true or false")
 
     for k in raw:
         if k not in _KNOWN_TOP_LEVEL:

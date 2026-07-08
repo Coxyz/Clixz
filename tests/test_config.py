@@ -37,6 +37,28 @@ class ValidateConfigTests(unittest.TestCase):
         cfg["settings"]["principals"]["komodo"]["kind"] = "nope"
         self.assertTrue(any("kind" in i for i in validate_config(cfg)))
 
+    def test_rule_recursive_must_be_bool(self) -> None:
+        cfg = _good()
+        cfg["rules"]["config_dir"]["recursive"] = "yes"
+        self.assertTrue(any("recursive" in i for i in validate_config(cfg)))
+
+    def test_rule_recursive_bool_is_accepted(self) -> None:
+        cfg = _good()
+        cfg["rules"]["config_dir"]["recursive"] = True
+        self.assertEqual([], validate_config(cfg))
+
+    def test_external_dir_recursive_must_be_bool(self) -> None:
+        cfg = _good()
+        cfg["images"] = {"dir": "/opt/images", "recursive": "yes"}
+        self.assertTrue(any("images.recursive" in i for i in validate_config(cfg)))
+
+    def test_external_dir_dockerfile_recursive_must_be_bool(self) -> None:
+        cfg = _good()
+        cfg["images"] = {"dir": "/opt/images", "dockerfile": {"mode": "664", "recursive": "yes"}}
+        self.assertTrue(
+            any("images.dockerfile.recursive" in i for i in validate_config(cfg))
+        )
+
     def test_dev_nested_under_settings_is_flagged(self) -> None:
         # The exact mistake that broke `coxyz dev`: dev indented under settings.
         cfg = _good()

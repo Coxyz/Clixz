@@ -121,6 +121,94 @@ class AclFixPlanningTests(unittest.TestCase):
                                     "ACL paths must not be fixed with chmod")
 
 
+class RecursiveAclTests(unittest.TestCase):
+    """`recursive: true` propagates a rule's named ACL to existing children."""
+
+    def _config_with_recursive_config_dir(self, root: Path) -> Config:
+        cfg = _make_config(root, _self_user(), _self_group())
+        rules = dict(cfg.rules)
+        rules["config_dir"] = RuleConfig(mode="750", acl={"komodo": "x"}, recursive=True)
+        return Config(
+            root_dir=cfg.root_dir, settings=cfg.settings, categories=cfg.categories,
+            rules=rules, exclude=cfg.exclude,
+        )
+
+    def test_recursive_rule_plans_setfacl_dash_r_and_dash_dr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            if not detect_acl_support(root):
+                self.skipTest("filesystem has no ACL support")
+            cfg = self._config_with_recursive_config_dir(root)
+            svc = root / "apps" / "svc"
+            (svc / "config").mkdir(parents=True)
+            (svc / "data").mkdir()
+            (svc / "compose.yaml").write_text("services: {}\n")
+
+            report = audit_service(
+                cfg, "apps", "svc", acl_enabled=True,
+                principals_available={"komodo": True},
+            )
+            config_finding = next(f for f in report.findings if f.rule_name == "config_dir")
+            self.assertIs(Severity.DRIFT, config_finding.severity)
+            kinds = [cmd[:2] for cmd in config_finding.fixes if cmd[0] == "setfacl"]
+            self.assertIn(["setfacl", "-R"], kinds)
+            self.assertIn(["setfacl", "-dR"], kinds)
+
+    def test_non_recursive_rule_has_no_dash_r_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            if not detect_acl_support(root):
+                self.skipTest("filesystem has no ACL support")
+            cfg = _make_config(root, _self_user(), _self_group())
+            svc = root / "apps" / "svc"
+            (svc / "config").mkdir(parents=True)
+            (svc / "data").mkdir()
+            (svc / "compose.yaml").write_text("services: {}\n")
+
+            report = audit_service(
+                cfg, "apps", "svc", acl_enabled=True,
+                principals_available={"komodo": True},
+            )
+            config_finding = next(f for f in report.findings if f.rule_name == "config_dir")
+            self.assertIs(Severity.DRIFT, config_finding.severity)
+            for cmd in config_finding.fixes:
+                if cmd[0] == "setfacl":
+                    self.assertNotIn("-R", cmd)
+                    self.assertNotIn("-dR", cmd)
+
+    def test_apply_recursive_grants_access_on_nested_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            if not detect_acl_support(root):
+                self.skipTest("filesystem has no ACL support")
+            cfg = self._config_with_recursive_config_dir(root)
+            svc = root / "apps" / "svc"
+            (svc / "config").mkdir(parents=True)
+            (svc / "data").mkdir()
+            (svc / "compose.yaml").write_text("services: {}\n")
+            nested = svc / "config" / "nested.conf"
+            nested.write_text("x\n")
+
+            report = audit_service(
+                cfg, "apps", "svc", acl_enabled=True,
+                principals_available={"komodo": True},
+            )
+            apply_findings(report.findings, dry_run=False)
+
+            nested_acl = read_acl(nested)
+            assert nested_acl is not None
+            self.assertEqual("x", nested_acl.named[("group", PRINCIPAL_GROUP)])
+
+            new_file = svc / "config" / "new.conf"
+            new_file.write_text("y\n")
+            new_acl = read_acl(new_file)
+            assert new_acl is not None
+            self.assertEqual(
+                "x", new_acl.named[("group", PRINCIPAL_GROUP)],
+                "default ACL must make the entry inherit onto new files",
+            )
+
+
 class AclApplyIntegrationTests(unittest.TestCase):
     """Apply real setfacl and verify effective rights are never restricted."""
 

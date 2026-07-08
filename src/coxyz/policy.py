@@ -275,6 +275,24 @@ def _setfacl_set_cmd(path: Path, rule: RuleConfig, config: Config) -> list[str]:
     return ["setfacl", "-k", "--set", acl_set_spec(rule, config), str(path)]
 
 
+def _recursive_acl_cmds(path: Path, rule: RuleConfig, config: Config) -> list[list[str]]:
+    """(Re)apply a rule's named ACL entries to a directory's existing contents.
+
+    Only the named entries are propagated (like the ``dev``/``build`` overlays)
+    — never the base ``u::``/``g::``/``o::`` mode, which is a property of each
+    child, not something to inherit from its parent. A default ACL is set too
+    so files created later automatically pick up the same entries.
+    """
+    entries = resolve_acl_entries(rule, config)
+    if not entries:
+        return []
+    tokens = ",".join(e.token for e in entries)
+    return [
+        ["setfacl", "-R", "-m", tokens, str(path)],
+        ["setfacl", "-dR", "-m", tokens, str(path)],
+    ]
+
+
 def plan_path(
     path: Path,
     rule: RuleConfig,
@@ -428,6 +446,8 @@ def _audit_acl(
         issues.extend(acl_issues)
     # A single setfacl --set fixes the mode, every named entry and the mask.
     fixes.append(_setfacl_set_cmd(state.path, rule, config))
+    if rule.recursive and state.is_dir:
+        fixes.extend(_recursive_acl_cmds(state.path, rule, config))
 
 
 def _setfacl_modify_base_cmd(path: Path, rule: RuleConfig, config: Config) -> list[str]:
@@ -624,7 +644,7 @@ def audit_external_dir(
     When ``file_name`` is given and the config defines ``ext.dockerfile``, the
     contained build file (e.g. ``Dockerfile``) is audited too against that rule.
     """
-    rule = RuleConfig(mode=ext.mode, acl=ext.acl, owner=ext.owner)
+    rule = RuleConfig(mode=ext.mode, acl=ext.acl, owner=ext.owner, recursive=ext.recursive)
     findings: list[Finding] = []
     for child in list_external_subdirs(ext):
         findings.append(_audit_path(

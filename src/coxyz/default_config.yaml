@@ -37,6 +37,9 @@ categories:
 # - acl:  per-principal ACL perms ("rx", "rw", "rwx", "x") or null to skip
 # - owner: optional "user:group" override (default: category owner)
 # - audit_only: if true, never modify; just report drift
+# - recursive: if true, each `acl` entry is also (re)applied to the directory's
+#              existing contents (setfacl -R) and set as a default ACL
+#              (setfacl -dR) so new children inherit it too. Ignored on files.
 rules:
   category_dir:
     mode: "750"
@@ -85,14 +88,18 @@ api:
 # Komodo Periphery can read the build context to build.
 # - acl: optional per-principal ACL on each subdirectory (same form as rules),
 #        or null/omitted to skip. Example below grants komodo read+exec.
-# - dockerfile: optional rule (mode/owner/acl) for the Dockerfile inside each
-#        image dir. When set, `image add` applies it and `check`/`apply` enforce
-#        it; when omitted the Dockerfile keeps mode 664 and is not audited.
+# - recursive: if true, `acl` is also (re)applied to each subdirectory's
+#        existing contents, plus as a default ACL for new files (see rules above).
+# - dockerfile: optional rule (mode/owner/acl/recursive) for the Dockerfile
+#        inside each image dir. When set, `image add` applies it and
+#        `check`/`apply` enforce it; when omitted the Dockerfile keeps mode 664
+#        and is not audited.
 images:
   dir: /opt/images
   owner: "boxyz_dev:boxyz_dev"
   mode: "775"
   acl: null
+  recursive: false
   # acl:
   #   komodo: "rx"
   # dockerfile:

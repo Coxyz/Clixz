@@ -34,7 +34,9 @@ from .policy import (
     plan_path,
     resolve_service,
 )
+from .archive import archive_service, list_archived
 from .scaffold import CreateRequest, create_service, validate_service_name
+from .update import UPDATABLE, UpdateRequest, update_service, validate_target
 from .image import DOCKERFILE_NAME, dockerfile_template, validate_image_name
 from .meta import (
     SERVICE_FILENAME,
@@ -725,6 +727,215 @@ def create_cmd(
     except (CommandExecutionError, OSError) as e:
         console.print(f"  [magenta]![/magenta] Could not refresh manifest: {e}")
         console.print("    Run [bold]coxyz manifest[/bold] once permissions allow.")
+
+
+# ─── update: rewrite compose.yaml / service.yaml of an existing service ───────
+
+def _read_new_content(from_file: Optional[Path]) -> str:
+    """Read replacement content from a file, or from stdin when given ``-``."""
+    if from_file is None:
+        err_console.print(
+            "[red]ERROR[/red] --from-file is required (use '-' to read stdin)."
+        )
+        raise typer.Exit(code=2)
+    if str(from_file) == "-":
+        return sys.stdin.read()
+    try:
+        return from_file.read_text(encoding="utf-8")
+    except OSError as e:
+        err_console.print(f"[red]ERROR[/red] Could not read {from_file}: {e}")
+        raise typer.Exit(code=2)
+
+
+def _print_diff(previous: str, content: str, path: Path) -> None:
+    import difflib
+
+    diff = list(difflib.unified_diff(
+        previous.splitlines(), content.splitlines(),
+        fromfile=f"a/{path.name}", tofile=f"b/{path.name}", lineterm="",
+    ))
+    if not diff:
+        console.print("  [dim](no textual change)[/dim]")
+        return
+    for line in diff:
+        if line.startswith("+") and not line.startswith("+++"):
+            console.print(f"  [green]{line}[/green]")
+        elif line.startswith("-") and not line.startswith("---"):
+            console.print(f"  [red]{line}[/red]")
+        elif line.startswith("@@"):
+            console.print(f"  [cyan]{line}[/cyan]")
+        else:
+            console.print(f"  [dim]{line}[/dim]")
+
+
+@app.command("update")
+def update_cmd(
+    service: Annotated[
+        str,
+        typer.Argument(
+            help="Service ('category/service' or unique name).",
+            autocompletion=_complete_service,
+        ),
+    ],
+    target: Annotated[
+        str,
+        typer.Option("--target", "-t", help=f"What to rewrite: {', '.join(sorted(UPDATABLE))}."),
+    ],
+    from_file: Annotated[
+        Optional[Path],
+        typer.Option("--from-file", "-f", help="New content ('-' reads stdin)."),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the diff and exit.")] = False,
+) -> None:
+    """Rewrite a service's compose.yaml or service.yaml (never .env, config/, data/)."""
+    try:
+        validate_target(target)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    content = _read_new_content(from_file)
+    if not dry_run:
+        ensure_root()
+    _print_runtime_banner()
+
+    try:
+        cat, svc, _ = resolve_service(ctx.config, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    req = UpdateRequest(category=cat, service=svc, target=target, content=content)
+    try:
+        result = update_service(
+            ctx.config, req,
+            dry_run=True,
+            acl_enabled=ctx.acl_enabled,
+            principals_available=ctx.principals_available,
+        )
+    except (ValueError, RuntimeError) as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[bold]Update {cat}/{svc}[/bold] → {result.path}")
+    for w in result.warnings:
+        console.print(f"  [magenta]![/magenta] {w}")
+    if result.unchanged:
+        console.print("  [green]✓ already up to date — nothing to do.[/green]")
+        raise typer.Exit()
+    _print_diff(result.previous, result.content, result.path)
+
+    if dry_run:
+        console.print("\n[dim]Dry-run — nothing written.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nWrite this content?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    try:
+        result = update_service(
+            ctx.config, req,
+            dry_run=False,
+            acl_enabled=ctx.acl_enabled,
+            principals_available=ctx.principals_available,
+        )
+    except (CommandExecutionError, ValueError, RuntimeError, OSError) as e:
+        err_console.print(f"[red]ERROR[/red] Could not update {result.path}: {e}")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[green]✓ Updated {result.path}[/green]")
+    if result.snapshot:
+        console.print(f"  [dim]Previous version kept at {result.snapshot}[/dim]")
+    if target == "service":
+        console.print("  [dim]Run `coxyz manifest` to refresh the dashboard.[/dim]")
+
+
+# ─── archive: retire a service without ever destroying it ─────────────────────
+
+@app.command("archive")
+def archive_cmd(
+    service: Annotated[
+        str,
+        typer.Argument(
+            help="Service ('category/service' or unique name).",
+            autocompletion=_complete_service,
+        ),
+    ],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="DESTRUCTIVE: delete instead of archiving. Interactive use only.",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan and exit.")] = False,
+) -> None:
+    """Move a service into the archive (default), or delete it with --force."""
+    if not dry_run:
+        ensure_root()
+    _print_runtime_banner()
+
+    try:
+        cat, svc, svc_path = resolve_service(ctx.config, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    if force:
+        console.print(f"\n[red bold]DELETE {cat}/{svc}[/red bold]")
+        console.print(f"  [red]Removes {svc_path} and ALL its contents: compose.yaml, "
+                      ".env, config/ and data/.[/red]")
+        console.print("  [red]This is irreversible — there will be no archive copy.[/red]")
+    else:
+        console.print(f"\n[bold]Archive {cat}/{svc}[/bold]")
+        console.print(f"  moves {svc_path} under {ctx.config.root_dir}/.archive/{cat}/{svc}/")
+        console.print("  [dim]Nothing is destroyed; the tree can be moved back.[/dim]")
+
+    if dry_run:
+        console.print("\n[dim]Dry-run — nothing changed.[/dim]")
+        raise typer.Exit()
+
+    if not yes:
+        prompt = "Delete it permanently?" if force else "Archive it?"
+        if not typer.confirm(f"\n{prompt}"):
+            console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit(code=1)
+    if force and not yes and not typer.confirm("Really? This cannot be undone"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    try:
+        result = archive_service(ctx.config, cat, svc, dry_run=False, force=force)
+    except (CommandExecutionError, RuntimeError) as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    if result.forced:
+        console.print(f"\n[green]✓ Deleted {result.source}[/green]")
+    else:
+        console.print(f"\n[green]✓ Archived to {result.destination}[/green]")
+    console.print("  [dim]Run `coxyz manifest` to refresh the dashboard.[/dim]")
+
+
+@app.command("archived")
+def archived_cmd() -> None:
+    """List archived service trees."""
+    _print_runtime_banner()
+    entries = list_archived(ctx.config)
+    if not entries:
+        console.print("[dim]Nothing archived.[/dim]")
+        raise typer.Exit()
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Category")
+    table.add_column("Service")
+    table.add_column("Archived at (UTC)")
+    table.add_column("Path")
+    for cat, svc, stamp, path in entries:
+        table.add_row(cat, svc, stamp, str(path))
+    console.print(table)
 
 
 # ─── manifest: aggregate service.yaml descriptors for the API/dashboard ───────

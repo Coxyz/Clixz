@@ -96,6 +96,10 @@ _DEFAULT_REPOS = ExternalDirConfig(dir=Path("/opt/repos"))
 # ``service.yaml`` is non-sensitive presentation metadata: owner rw, group r.
 _BUILTIN_RULE_DEFAULTS: dict[str, "RuleConfig"] = {
     "service_file": RuleConfig(mode="640"),
+    # ``spec.json`` — the typed specification a generated compose.yaml is
+    # rendered from. Same sensitivity as service.yaml: non-secret metadata,
+    # owner rw, group r. Komodo needs no access: it consumes the compose.
+    "spec_file": RuleConfig(mode="640"),
 }
 
 

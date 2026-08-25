@@ -22,9 +22,11 @@ The rendered layout follows the canonical model of ``instruction-compose.md``
 from __future__ import annotations
 
 import grp
+import json
 import pwd
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -202,6 +204,9 @@ _ALLOWED_KEYS = {
     "run_as_category_user",
 }
 
+# Identity fields: they place the service in the tree, so a patch cannot move it.
+_IMMUTABLE_KEYS = {"category", "service"}
+
 
 def spec_from_dict(raw: Any) -> ServiceSpec:
     """Build a spec from a plain mapping, rejecting any unknown key.
@@ -249,6 +254,95 @@ def spec_from_dict(raw: Any) -> ServiceSpec:
         depends_on=[str(d) for d in (raw.get("depends_on") or [])],
         run_as_category_user=bool(raw.get("run_as_category_user", True)),
     )
+
+
+# ─── persistence ──────────────────────────────────────────────────────────────
+
+SPEC_FILENAME = "spec.json"
+
+
+def spec_to_dict(spec: ServiceSpec) -> dict[str, Any]:
+    """The spec as a plain mapping, round-trippable through :func:`spec_from_dict`."""
+    return {
+        "category": spec.category,
+        "service": spec.service,
+        "image": spec.image,
+        "expose": list(spec.expose),
+        "mounts": [
+            {"source": m.source, "target": m.target, "read_only": m.read_only}
+            for m in spec.mounts
+        ],
+        "network": spec.network,
+        "pids_limit": spec.pids_limit,
+        "mem_limit": spec.mem_limit,
+        "cpus": spec.cpus,
+        "tmpfs_size": spec.tmpfs_size,
+        "depends_on": list(spec.depends_on),
+        "run_as_category_user": spec.run_as_category_user,
+    }
+
+
+def spec_json(spec: ServiceSpec) -> str:
+    return json.dumps(spec_to_dict(spec), indent=2, ensure_ascii=False) + "\n"
+
+
+def spec_path(config: Config, category: str, service: str) -> Path:
+    return config.root_dir / category / service / SPEC_FILENAME
+
+
+def load_spec(config: Config, category: str, service: str) -> ServiceSpec:
+    """Read a service's stored spec. Raises :class:`SpecError` if unusable."""
+    path = spec_path(config, category, service)
+    if not path.is_file():
+        raise SpecError(
+            f"{category}/{service} has no {SPEC_FILENAME}: it was not generated "
+            "from a spec, so it cannot be patched. Edit its compose.yaml by hand, "
+            "or re-create the service from a spec."
+        )
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SpecError(f"Unreadable {path}: {exc}") from None
+    return spec_from_dict(raw)
+
+
+def apply_patch(spec: ServiceSpec, patch: Any) -> ServiceSpec:
+    """Merge a partial mapping into an existing spec.
+
+    Semantics are deliberately blunt: a field present in the patch **replaces**
+    the current value outright, lists included. Deep-merging a list of mounts
+    would raise questions with no good answer (match on target? on index?) and
+    make the result hard to predict — the caller can always resend the full
+    list, which is short.
+
+    ``category`` and ``service`` are not patchable: renaming or moving a service
+    is a different operation entirely (its directory, ownership and ACLs would
+    all have to move), and silently accepting it here would write a compose that
+    no longer matches the tree it lives in.
+    """
+    if not isinstance(patch, dict):
+        raise SpecError("The patch must be a JSON object.")
+    if not patch:
+        raise SpecError("Empty patch: nothing to change.")
+
+    unknown = set(patch) - _ALLOWED_KEYS
+    if unknown:
+        raise SpecError(
+            f"Unknown field(s): {', '.join(sorted(unknown))}. "
+            f"Patchable: {', '.join(sorted(_ALLOWED_KEYS - _IMMUTABLE_KEYS))}."
+        )
+    frozen = _IMMUTABLE_KEYS & set(patch)
+    for key in sorted(frozen):
+        if str(patch[key]) != str(getattr(spec, key)):
+            raise SpecError(
+                f"Field '{key}' cannot be changed by a patch (currently "
+                f"{getattr(spec, key)!r}). Moving or renaming a service is a "
+                "separate operation."
+            )
+
+    merged = spec_to_dict(spec)
+    merged.update({k: v for k, v in patch.items() if k not in _IMMUTABLE_KEYS})
+    return spec_from_dict(merged)
 
 
 # ─── rendering ────────────────────────────────────────────────────────────────

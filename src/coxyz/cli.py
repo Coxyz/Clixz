@@ -36,7 +36,21 @@ from .policy import (
 )
 from .archive import archive_service, list_archived
 from .scaffold import CreateRequest, create_service, validate_service_name
-from .update import UPDATABLE, UpdateRequest, update_service, validate_target
+from .spec import (
+    SPEC_FILENAME,
+    SpecError,
+    render_compose,
+    spec_from_dict,
+    spec_json,
+)
+from .spec import validate as validate_spec
+from .update import (
+    UPDATABLE,
+    UpdateRequest,
+    update_from_patch,
+    update_service,
+    validate_target,
+)
 from .image import DOCKERFILE_NAME, dockerfile_template, validate_image_name
 from .meta import (
     SERVICE_FILENAME,
@@ -651,16 +665,43 @@ def create_cmd(
         Optional[str],
         typer.Option("--name", "-n", help="Service name."),
     ] = None,
+    spec_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--spec", "-s",
+            help="JSON spec; generates compose.yaml instead of leaving it empty "
+                 "('-' reads stdin). Takes category and name from the spec.",
+        ),
+    ] = None,
     yes: Annotated[
         bool,
         typer.Option("--yes", "-y", help="Skip confirmation prompt."),
     ] = False,
 ) -> None:
-    """Scaffold a new service: directories + empty compose.yaml and .env."""
+    """Scaffold a new service: directories, then a compose.yaml from a spec (or empty)."""
     ensure_root()
     _print_runtime_banner()
 
     cfg = ctx.config
+
+    spec = None
+    if spec_file is not None:
+        import json
+
+        try:
+            spec = validate_spec(spec_from_dict(json.loads(_read_new_content(spec_file))), cfg)
+        except (SpecError, ValueError) as e:
+            err_console.print(f"[red]ERROR[/red] {e}")
+            raise typer.Exit(code=2)
+        # The spec carries its own identity; a divergent --category/--name would
+        # produce a tree that does not match the compose written into it.
+        if (category and category != spec.category) or (name and name != spec.service):
+            err_console.print(
+                "[red]ERROR[/red] --category/--name conflict with the spec "
+                f"({spec.category}/{spec.service})."
+            )
+            raise typer.Exit(code=2)
+        category, name = spec.category, spec.service
 
     # Interactive prompts for missing arguments
     if not category:
@@ -709,6 +750,17 @@ def create_cmd(
 
     for cmd in executed:
         console.print(f"  [green]RUN[/green] {' '.join(cmd)}")
+
+    if spec is not None:
+        try:
+            _write_spec_and_compose(cfg, spec)
+        except (CommandExecutionError, OSError) as e:
+            err_console.print(f"[red]ERROR[/red] Could not write the generated files: {e}")
+            raise typer.Exit(code=2)
+        console.print(
+            f"  [green]✓[/green] compose.yaml generated from the spec "
+            f"({SPEC_FILENAME} kept alongside)"
+        )
 
     console.print(f"\n[green]✓ Created {svc_path}[/green]")
     console.print(
@@ -768,6 +820,86 @@ def _print_diff(previous: str, content: str, path: Path) -> None:
             console.print(f"  [dim]{line}[/dim]")
 
 
+def _write_spec_and_compose(cfg: Config, spec) -> None:
+    """Write the generated compose.yaml and its spec.json, with correct perms."""
+    svc_path = cfg.root_dir / spec.category / spec.service
+    runner = CommandRunner(dry_run=False)
+    for path, content, rule_name in (
+        (svc_path / "compose.yaml", render_compose(spec, cfg), "compose_file"),
+        (svc_path / SPEC_FILENAME, spec_json(spec), "spec_file"),
+    ):
+        runner.write_file(path, content)
+        rule = cfg.rule_or_default(rule_name)
+        owner = rule.owner or cfg.category(spec.category).owner_spec
+        for cmd in plan_path(
+            path, rule, owner, cfg, is_dir=False,
+            acl_enabled=ctx.acl_enabled, principals_available=ctx.principals_available,
+        ):
+            runner.run(cmd)
+
+
+def _update_from_patch(service: str, patch_file: Path, *, yes: bool, dry_run: bool) -> None:
+    """`update --patch`: merge a JSON patch into the spec and regenerate compose.yaml."""
+    import json
+
+    raw = _read_new_content(patch_file)
+    try:
+        patch = json.loads(raw)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] Invalid JSON patch: {e}")
+        raise typer.Exit(code=2)
+
+    if not dry_run:
+        ensure_root()
+    _print_runtime_banner()
+
+    try:
+        cat, svc, _ = resolve_service(ctx.config, service)
+    except ValueError as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    def run(*, write: bool):
+        return update_from_patch(
+            ctx.config, cat, svc, patch,
+            dry_run=not write, acl_enabled=ctx.acl_enabled,
+            principals_available=ctx.principals_available,
+        )
+
+    try:
+        compose_r, spec_r = run(write=False)
+    except (SpecError, ValueError, RuntimeError) as e:
+        err_console.print(f"[red]ERROR[/red] {e}")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[bold]Patch {cat}/{svc}[/bold]  {', '.join(sorted(patch))}")
+    if spec_r.unchanged and compose_r.unchanged:
+        console.print("  [green]✓ already up to date — nothing to do.[/green]")
+        raise typer.Exit()
+    console.print(f"\n[dim]{spec_r.path.name}[/dim]")
+    _print_diff(spec_r.previous, spec_r.content, spec_r.path)
+    console.print(f"\n[dim]{compose_r.path.name}[/dim] [dim](regenerated)[/dim]")
+    _print_diff(compose_r.previous, compose_r.content, compose_r.path)
+
+    if dry_run:
+        console.print("\n[dim]Dry-run — nothing written.[/dim]")
+        raise typer.Exit()
+    if not yes and not typer.confirm("\nApply this patch?"):
+        console.print("[dim]Aborted.[/dim]")
+        raise typer.Exit(code=1)
+
+    try:
+        compose_r, spec_r = run(write=True)
+    except (CommandExecutionError, SpecError, ValueError, RuntimeError, OSError) as e:
+        err_console.print(f"[red]ERROR[/red] Could not apply the patch: {e}")
+        raise typer.Exit(code=2)
+
+    console.print(f"\n[green]✓ Patched {cat}/{svc}[/green]")
+    if compose_r.snapshot:
+        console.print(f"  [dim]Previous compose kept at {compose_r.snapshot}[/dim]")
+    console.print("  [dim]Redeploy the stack for the new compose to take effect.[/dim]")
+
+
 @app.command("update")
 def update_cmd(
     service: Annotated[
@@ -778,17 +910,34 @@ def update_cmd(
         ),
     ],
     target: Annotated[
-        str,
+        Optional[str],
         typer.Option("--target", "-t", help=f"What to rewrite: {', '.join(sorted(UPDATABLE))}."),
-    ],
+    ] = None,
     from_file: Annotated[
         Optional[Path],
         typer.Option("--from-file", "-f", help="New content ('-' reads stdin)."),
     ] = None,
+    patch_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--patch", "-p",
+            help="JSON patch on the service spec; regenerates compose.yaml ('-' reads stdin).",
+        ),
+    ] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the diff and exit.")] = False,
 ) -> None:
-    """Rewrite a service's compose.yaml or service.yaml (never .env, config/, data/)."""
+    """Patch a service spec (--patch), or rewrite compose.yaml / service.yaml (--target)."""
+    if patch_file is not None and target is not None:
+        err_console.print("[red]ERROR[/red] --patch and --target are mutually exclusive.")
+        raise typer.Exit(code=2)
+    if patch_file is not None:
+        _update_from_patch(service, patch_file, yes=yes, dry_run=dry_run)
+        return
+    if target is None:
+        err_console.print("[red]ERROR[/red] Give --patch (spec) or --target (raw file).")
+        raise typer.Exit(code=2)
+
     try:
         validate_target(target)
     except ValueError as e:

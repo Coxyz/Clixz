@@ -113,6 +113,62 @@ def validate_content(category: str, service: str, target: str, content: str) -> 
     return issues
 
 
+def update_from_patch(
+    config: Config,
+    category: str,
+    service: str,
+    patch: object,
+    *,
+    dry_run: bool,
+    acl_enabled: bool,
+    principals_available: dict[str, bool],
+) -> tuple[UpdateResult, UpdateResult]:
+    """Patch a service's stored spec, then regenerate its compose.yaml.
+
+    The caller sends only the fields it wants to change; the merged spec is
+    re-validated in full, so a patch can never leave the service in a state the
+    spec module would have refused to create. Returns ``(compose, spec)``
+    results — the compose is written first, because a spec.json that no longer
+    matches the deployed compose is the more confusing failure.
+    """
+    from .spec import (  # local import: spec imports scaffold, which imports policy
+        SPEC_FILENAME,
+        apply_patch,
+        load_spec,
+        render_compose,
+        spec_json,
+        spec_path,
+        validate,
+    )
+
+    current = load_spec(config, category, service)
+    merged = validate(apply_patch(current, patch), config)
+
+    compose_result = update_service(
+        config,
+        UpdateRequest(category, service, "compose", render_compose(merged, config)),
+        dry_run=dry_run, acl_enabled=acl_enabled,
+        principals_available=principals_available,
+    )
+
+    path = spec_path(config, category, service)
+    previous = path.read_text(encoding="utf-8") if path.is_file() else ""
+    content = spec_json(merged)
+    spec_result = UpdateResult(path=path, previous=previous, content=content)
+    if not spec_result.unchanged:
+        runner = CommandRunner(dry_run=dry_run)
+        runner.write_file(path, content)
+        rule = config.rule_or_default("spec_file")
+        owner = rule.owner or config.category(category).owner_spec
+        for command in plan_path(
+            path, rule, owner, config, is_dir=False,
+            acl_enabled=acl_enabled, principals_available=principals_available,
+        ):
+            runner.run(command)
+        spec_result.commands = runner.executed
+    return compose_result, spec_result
+
+
 def update_service(
     config: Config,
     req: UpdateRequest,

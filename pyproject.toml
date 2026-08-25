@@ -37,6 +37,8 @@ coxyz = "coxyz.cli:app"
 # script places its code under the root-owned venv, so the ExecStart target
 # cannot be rewritten by an application group.
 coxyz-admind = "coxyz.admind:main"
+# Unprivileged gateway for the MCP container; same reasoning on the install path.
+coxyz-runnerd = "coxyz.runnerd:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "coxyz.__version__" }

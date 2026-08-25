@@ -1,0 +1,54 @@
+[Unit]
+Description=coxyz gateway for the MCP server (read-only, relays mutations)
+Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
+After=network.target coxyz-admind.socket
+Wants=coxyz-admind.socket
+
+[Service]
+Type=simple
+# Unprivileged on purpose. svc_mcprun holds no supplementary privilege — in
+# particular neither sudo nor docker — and must not gain any: an escape here
+# should yield read access and nothing more. It needs the svc_* groups only to
+# read the service tree; .env files stay unreadable (root:root, ACL docker:r).
+User=svc_mcprun
+Group=svc_mcprun
+SupplementaryGroups=svc_apps svc_automation svc_infra svc_monitoring svc_network
+
+ExecStart=/opt/pipx/venvs/coxyz-cli/bin/coxyz-runnerd
+Environment=COXYZ_RUNNER_SOCKET=/run/coxyz-runner/coxyz-runner.sock
+Environment=COXYZ_ADMIN_SOCKET=/run/coxyz-admin/coxyz-admin.sock
+Environment=PYTHONUNBUFFERED=1
+
+# /run/coxyz-runner, created and cleaned by systemd. 0750 so the MCP container
+# (which carries the svc_mcprun GID) can traverse and open the socket without
+# being able to create anything in the directory.
+RuntimeDirectory=coxyz-runner
+RuntimeDirectoryMode=0750
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+# Reads the service tree; writes nothing. Mutations go through admind.
+ReadOnlyPaths=/srv/docker /etc/coxyz
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -33,6 +33,10 @@ Issues = "https://github.com/Coxyz/Checker/issues"
 
 [project.scripts]
 coxyz = "coxyz.cli:app"
+# Privileged daemon, started by systemd as root. Installing it as a console
+# script places its code under the root-owned venv, so the ExecStart target
+# cannot be rewritten by an application group.
+coxyz-admind = "coxyz.admind:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "coxyz.__version__" }

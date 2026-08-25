@@ -1,0 +1,23 @@
+[Unit]
+Description=Socket for the coxyz privileged admin daemon
+Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
+
+[Socket]
+ListenStream=/run/coxyz-admin/coxyz-admin.sock
+SocketMode=0660
+SocketUser=root
+# Only svc_mcprun may connect. The daemon re-checks the caller's uid through
+# SO_PEERCRED: the mode is the first gate, the kernel-provided credential is the
+# one the decision is taken on.
+SocketGroup=svc_mcprun
+
+# One root process serving every connection, not one per connection: Accept=no
+# means a burst of connections cannot fork a burst of root processes.
+Accept=no
+
+# Bound the damage a misbehaving client can do while we are at it.
+MaxConnections=16
+MaxConnectionsPerSource=4
+
+[Install]
+WantedBy=sockets.target

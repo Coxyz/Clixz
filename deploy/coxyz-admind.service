@@ -1,0 +1,53 @@
+[Unit]
+Description=coxyz privileged admin daemon (create / update / archive)
+Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
+Requires=coxyz-admind.socket
+After=coxyz-admind.socket
+
+[Service]
+Type=simple
+# Root is genuinely required: create and archive chown to the svc_* accounts and
+# set ACLs (CAP_CHOWN + CAP_FOWNER). The capability set below is narrowed to
+# exactly that, so "root" here is far from full root.
+ExecStart=/opt/pipx/venvs/coxyz-cli/bin/coxyz-admind
+Environment=PYTHONUNBUFFERED=1
+# The only uid allowed to drive this daemon. Must match the account running
+# coxyz-runnerd; set it after creating svc_mcprun.
+Environment=COXYZ_ADMIN_ALLOWED_UID=
+
+# Stop when idle: the root process only exists while work is in flight.
+# (Remove if you would rather keep it resident.)
+# RuntimeMaxSec=
+
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The daemon writes only where services live and where it logs. /etc/coxyz stays
+# read-only: it must never rewrite the rules it enforces.
+ReadWritePaths=/srv/docker /var/log
+ReadOnlyPaths=/etc/coxyz
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

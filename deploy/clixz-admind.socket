@@ -1,6 +1,6 @@
 [Unit]
 Description=Socket for the clixz privileged admin daemon
-Documentation=file:/opt/repos/clixz-cli/deploy/README.md
+Documentation=file:/opt/repos/clixz/deploy/README.md
 
 [Socket]
 # systemd owns the directory lifecycle; without this the parent survives

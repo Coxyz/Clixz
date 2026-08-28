@@ -1,6 +1,6 @@
 [Unit]
 Description=clixz privileged admin daemon (create / update / archive)
-Documentation=file:/opt/repos/clixz-cli/deploy/README.md
+Documentation=file:/opt/repos/clixz/deploy/README.md
 Requires=clixz-admind.socket
 After=clixz-admind.socket
 

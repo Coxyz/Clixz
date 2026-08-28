@@ -1,6 +1,6 @@
 [Unit]
 Description=clixz gateway for the MCP server (read-only, relays mutations)
-Documentation=file:/opt/repos/clixz-cli/deploy/README.md
+Documentation=file:/opt/repos/clixz/deploy/README.md
 After=network.target clixz-admind.socket
 Wants=clixz-admind.socket
 
@@ -18,6 +18,10 @@ SupplementaryGroups=svc_apps svc_automation svc_infra svc_monitoring svc_network
 # installer put it there (pipx, uv, pip). Pointing at an installer-specific venv
 # path instead would silently break the unit the day the installer changes.
 ExecStart=/usr/local/bin/clixz-runnerd
+# Explicit rather than relying on the package default: the default has moved
+# between releases, and a unit that breaks when the package is upgraded is a
+# unit that will break at the worst moment.
+Environment=CLIXZ_BIN=/usr/local/bin/clixz
 Environment=CLIXZ_RUNNER_SOCKET=/run/clixz-runner/clixz-runner.sock
 Environment=CLIXZ_ADMIN_SOCKET=/run/clixz-admin/clixz-admin.sock
 Environment=PYTHONUNBUFFERED=1

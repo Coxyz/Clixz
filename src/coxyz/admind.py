@@ -61,6 +61,7 @@ AUDIT_LOG = Path(os.environ.get("COXYZ_ADMIN_LOG", "/var/log/coxyz-admind.log"))
 PLAN_TTL = int(os.environ.get("COXYZ_ADMIN_PLAN_TTL", "300"))
 MAX_REQUEST = 256 * 1024
 MAX_PLANS = 32
+MAX_HASH_ATTEMPTS = 3
 
 # Services whose compose drives the host itself. Mutating any of them from an
 # automated caller is a foot-gun with no upside: npm is the reverse proxy that
@@ -118,15 +119,32 @@ class PlanStore:
         return pid
 
     def take(self, plan_id: str, digest: str) -> dict:
+        """Consume a plan, but only once its hash is confirmed.
+
+        The check happens *before* the plan is removed. Popping first would let
+        a mistyped or truncated hash destroy a legitimate plan, turning a
+        transient client glitch into a lost approval. Guessing the digest is not
+        a threat worth optimising against — it is SHA-256, and the caller was
+        handed it in the plan response — but repeated failures still drop the
+        plan, so a confused client cannot retry indefinitely.
+        """
         self._sweep()
-        plan = self._plans.pop(plan_id, None)
+        plan = self._plans.get(plan_id)
         if plan is None:
             raise AdminError("Unknown or expired plan — run the plan step again.")
         if not secrets.compare_digest(plan["hash"], digest):
+            plan["attempts"] = plan.get("attempts", 0) + 1
+            if plan["attempts"] >= MAX_HASH_ATTEMPTS:
+                del self._plans[plan_id]
+                raise AdminError(
+                    "The hash did not match too many times; the plan has been "
+                    "discarded. Run the plan step again."
+                )
             raise AdminError(
                 "The hash does not match the approved plan. Refusing to apply "
                 "content that differs from what was reviewed."
             )
+        del self._plans[plan_id]
         return plan
 
 

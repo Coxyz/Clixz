@@ -128,6 +128,28 @@ class PlanBindingTests(DaemonTestCase):
         with self.assertRaises(admind.AdminError):
             admind.handle({"op": "apply", "plan_id": plan["plan_id"], "hash": plan["hash"]})
 
+    def test_a_wrong_hash_does_not_destroy_the_plan(self) -> None:
+        # A truncated or mistyped hash is a client glitch, not an attack: it
+        # must not cost the user their approved plan.
+        self._service()
+        plan = admind.handle({"op": "plan", "action": "update", "service": "demo",
+                              "patch": {"mem_limit": "1g"}})
+        with self.assertRaises(admind.AdminError):
+            admind.handle({"op": "apply", "plan_id": plan["plan_id"], "hash": "0" * 64})
+        result = admind.handle({"op": "apply", "plan_id": plan["plan_id"],
+                                "hash": plan["hash"]})
+        self.assertTrue(result["applied"])
+
+    def test_repeated_wrong_hashes_discard_the_plan(self) -> None:
+        self._service()
+        plan = admind.handle({"op": "plan", "action": "update", "service": "demo",
+                              "patch": {"mem_limit": "1g"}})
+        for _ in range(admind.MAX_HASH_ATTEMPTS):
+            with self.assertRaises(admind.AdminError):
+                admind.handle({"op": "apply", "plan_id": plan["plan_id"], "hash": "0" * 64})
+        with self.assertRaises(admind.AdminError):
+            admind.handle({"op": "apply", "plan_id": plan["plan_id"], "hash": plan["hash"]})
+
     def test_unknown_plan_is_refused(self) -> None:
         with self.assertRaises(admind.AdminError):
             admind.handle({"op": "apply", "plan_id": "nope", "hash": "0" * 64})

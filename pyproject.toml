@@ -52,7 +52,7 @@ clixz = ["default_config.yaml"]
 # `make release` drives this: bumps the version, commits, and creates a vX.Y.Z
 # tag. Pushing that tag triggers .github/workflows/publish.yml → PyPI.
 [tool.bumpversion]
-current_version = "1.1.4"
+current_version = "1.2.0"
 allow_dirty = false
 commit = true
 message = "Bump version: {current_version} → {new_version}"

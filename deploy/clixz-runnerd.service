@@ -14,7 +14,10 @@ User=svc_mcprun
 Group=svc_mcprun
 SupplementaryGroups=svc_apps svc_automation svc_infra svc_monitoring svc_network
 
-ExecStart=/opt/pipx/venvs/clixz/bin/clixz-runnerd
+# /usr/local/bin is root:root 755, so this stays a trustworthy target whichever
+# installer put it there (pipx, uv, pip). Pointing at an installer-specific venv
+# path instead would silently break the unit the day the installer changes.
+ExecStart=/usr/local/bin/clixz-runnerd
 Environment=CLIXZ_RUNNER_SOCKET=/run/clixz-runner/clixz-runner.sock
 Environment=CLIXZ_ADMIN_SOCKET=/run/clixz-admin/clixz-admin.sock
 Environment=PYTHONUNBUFFERED=1

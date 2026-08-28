@@ -9,7 +9,10 @@ Type=simple
 # Root is genuinely required: create and archive chown to the svc_* accounts and
 # set ACLs (CAP_CHOWN + CAP_FOWNER). The capability set below is narrowed to
 # exactly that, so "root" here is far from full root.
-ExecStart=/opt/pipx/venvs/clixz/bin/clixz-admind
+# /usr/local/bin is root:root 755, so this stays a trustworthy target whichever
+# installer put it there (pipx, uv, pip). Pointing at an installer-specific venv
+# path instead would silently break the unit the day the installer changes.
+ExecStart=/usr/local/bin/clixz-admind
 Environment=PYTHONUNBUFFERED=1
 # The only uid allowed to drive this daemon. Must match the account running
 # clixz-runnerd; set it after creating svc_mcprun.

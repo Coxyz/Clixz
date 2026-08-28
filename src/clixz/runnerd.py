@@ -36,7 +36,7 @@ import sys
 
 from . import compat
 
-CLIXZ_BIN = compat.env("BIN", "/opt/pipx/venvs/clixz/bin/clixz")
+CLIXZ_BIN = compat.env("BIN", "/usr/local/bin/clixz")
 SOCKET_PATH = compat.env("RUNNER_SOCKET", "/run/clixz-runner/clixz-runner.sock")
 ADMIN_SOCKET = compat.env("ADMIN_SOCKET", "/run/clixz-admin/clixz-admin.sock")
 TIMEOUT = int(compat.env("RUNNER_TIMEOUT", "60"))

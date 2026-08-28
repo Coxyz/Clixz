@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from coxyz.archive import ARCHIVE_DIRNAME, archive_root, archive_service, list_archived
-from coxyz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
+from clixz.archive import ARCHIVE_DIRNAME, archive_root, archive_service, list_archived
+from clixz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
 
 
 def _config(root: Path) -> Config:

@@ -1,4 +1,4 @@
-"""Typed configuration loader for coxyz."""
+"""Typed configuration loader for clixz."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+
+from . import compat
 
 PrincipalKind = Literal["group", "user"]
 AclPerms = Literal["rx", "rw", "rwx", "x"]
@@ -66,7 +68,7 @@ _DEFAULT_DEV = DevConfig(
 
 @dataclass(frozen=True)
 class ExternalDirConfig:
-    """A directory of subdirectories coxyz manages outside ``root_dir``.
+    """A directory of subdirectories clixz manages outside ``root_dir``.
 
     Used for ``images`` (self-built image build contexts under ``/opt/images``)
     and ``repos`` (source repos under ``/opt/repos``). Each immediate
@@ -91,7 +93,7 @@ _DEFAULT_REPOS = ExternalDirConfig(dir=Path("/opt/repos"))
 
 
 # Built-in rule defaults used when a config predates a newer rule. This keeps
-# coxyz working against an existing /etc/coxyz/config.yaml that has not yet been
+# clixz working against an existing /etc/clixz/config.yaml that has not yet been
 # updated with the rule (e.g. ``service_file`` introduced for ``service.yaml``).
 # ``service.yaml`` is non-sensitive presentation metadata: owner rw, group r.
 _BUILTIN_RULE_DEFAULTS: dict[str, "RuleConfig"] = {
@@ -141,9 +143,9 @@ class Config:
 
     @property
     def resolved_manifest_path(self) -> Path:
-        """Where ``coxyz manifest`` writes the aggregated services manifest.
+        """Where ``clixz manifest`` writes the aggregated services manifest.
 
-        Defaults to the coxyz-api service's data directory so it can be mounted
+        Defaults to the clixz-api service's data directory so it can be mounted
         read-only into the API container.
         """
         if self.manifest_path is not None:
@@ -153,10 +155,8 @@ class Config:
 
 # ─── Loading ────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG_LOCATIONS: tuple[Path, ...] = (
-    Path("/etc/coxyz/config.yaml"),
-    Path.home() / ".config" / "coxyz" / "config.yaml",
-)
+# Includes the pre-rename locations as a fallback — see clixz.compat.
+DEFAULT_CONFIG_LOCATIONS: tuple[Path, ...] = compat.config_locations()
 
 
 def _load_yaml(path: Path) -> dict:
@@ -169,7 +169,7 @@ def _load_yaml(path: Path) -> dict:
 
 def _load_bundled_default() -> dict:
     """Load the default config bundled with the package."""
-    resource = files("coxyz").joinpath("default_config.yaml")
+    resource = files("clixz").joinpath("default_config.yaml")
     return yaml.safe_load(resource.read_text(encoding="utf-8"))
 
 
@@ -349,9 +349,9 @@ def load_raw_config(source: Path | None) -> dict:
     return _load_yaml(source) if source is not None else _load_bundled_default()
 
 
-# ─── Structural validation (for `coxyz check`) ──────────────────────────────
+# ─── Structural validation (for `clixz check`) ──────────────────────────────
 
-# Top-level keys coxyz understands. Anything else is flagged as a likely typo
+# Top-level keys clixz understands. Anything else is flagged as a likely typo
 # or a section indented into the wrong place.
 _KNOWN_TOP_LEVEL = {
     "root_dir", "settings", "komodo", "categories", "rules", "exclude",
@@ -366,7 +366,7 @@ def validate_config(raw: dict) -> list[str]:
     """Return human-readable structural problems in a raw config (empty list = OK).
 
     This is intentionally lenient and exhaustive: it collects *every* issue it
-    can find (rather than failing on the first) so ``coxyz check`` can report
+    can find (rather than failing on the first) so ``clixz check`` can report
     them all — missing keys, bad values, and sections nested in the wrong place.
     """
     if not isinstance(raw, dict):

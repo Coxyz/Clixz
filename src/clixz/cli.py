@@ -1,4 +1,4 @@
-"""coxyz CLI entry point."""
+"""clixz CLI entry point."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from . import __version__
+from . import __version__, compat
 from .config import Config, RuleConfig, load_config, load_raw_config, validate_config
 from .policy import (
     DevOverlay,
@@ -80,7 +80,7 @@ from .system import (
 )
 
 app = typer.Typer(
-    name="coxyz",
+    name="clixz",
     help="CLI to manage Docker services under /srv/docker.",
     no_args_is_help=True,
     add_completion=True,
@@ -107,13 +107,13 @@ def ensure_root() -> None:
     """Re-exec the current invocation under ``sudo`` when not already root.
 
     Mutating commands chown/chmod/setfacl under the root dir and write into
-    system locations (``/srv/docker``, ``/etc/coxyz``), all of which need root.
+    system locations (``/srv/docker``, ``/etc/clixz``), all of which need root.
     Rather than make the user remember to prefix every call with ``sudo``, we
     transparently re-exec the exact same command through sudo. A no-op when
-    already running as root, or when ``COXYZ_NO_SUDO`` is set (for containers,
+    already running as root, or when ``CLIXZ_NO_SUDO`` is set (for containers,
     CI, or users who'd rather manage elevation themselves).
     """
-    if os.geteuid() == 0 or os.environ.get("COXYZ_NO_SUDO"):
+    if os.geteuid() == 0 or compat.env("NO_SUDO"):
         return
     if shutil.which("sudo") is None:
         err_console.print(
@@ -123,7 +123,7 @@ def ensure_root() -> None:
         raise typer.Exit(code=2)
     # Resolve argv[0] to an absolute path so sudo's reduced PATH still finds it,
     # then re-exec through the *same* interpreter. --preserve-env=EDITOR keeps
-    # `coxyz edit` opening the user's editor across the privilege boundary.
+    # `clixz edit` opening the user's editor across the privilege boundary.
     script = sys.argv[0]
     if not os.path.isabs(script):
         script = shutil.which(script) or os.path.abspath(script)
@@ -184,7 +184,7 @@ def _complete_image(incomplete: str) -> list[str]:
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"coxyz {__version__}")
+        console.print(f"clixz {__version__}")
         raise typer.Exit()
 
 
@@ -199,7 +199,7 @@ def main(
         typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version."),
     ] = None,
 ) -> None:
-    """Manage Docker services under /srv/docker (coxyz rules)."""
+    """Manage Docker services under /srv/docker (clixz rules)."""
     missing = check_required_bins()
     if missing:
         err_console.print(f"[red]ERROR[/red] Missing required binaries: {', '.join(missing)}")
@@ -778,7 +778,7 @@ def create_cmd(
         )
     except (CommandExecutionError, OSError) as e:
         console.print(f"  [magenta]![/magenta] Could not refresh manifest: {e}")
-        console.print("    Run [bold]coxyz manifest[/bold] once permissions allow.")
+        console.print("    Run [bold]clixz manifest[/bold] once permissions allow.")
 
 
 # ─── update: rewrite compose.yaml / service.yaml of an existing service ───────
@@ -997,7 +997,7 @@ def update_cmd(
     if result.snapshot:
         console.print(f"  [dim]Previous version kept at {result.snapshot}[/dim]")
     if target == "service":
-        console.print("  [dim]Run `coxyz manifest` to refresh the dashboard.[/dim]")
+        console.print("  [dim]Run `clixz manifest` to refresh the dashboard.[/dim]")
 
 
 # ─── archive: retire a service without ever destroying it ─────────────────────
@@ -1065,7 +1065,7 @@ def archive_cmd(
         console.print(f"\n[green]✓ Deleted {result.source}[/green]")
     else:
         console.print(f"\n[green]✓ Archived to {result.destination}[/green]")
-    console.print("  [dim]Run `coxyz manifest` to refresh the dashboard.[/dim]")
+    console.print("  [dim]Run `clixz manifest` to refresh the dashboard.[/dim]")
 
 
 @app.command("archived")
@@ -1230,7 +1230,7 @@ def meta_scaffold_cmd(
         raise typer.Exit(code=2)
 
     console.print(f"[green]✓ Created {descriptor}[/green]")
-    console.print(f"  Edit it, then run [bold]coxyz manifest[/bold] to publish.")
+    console.print(f"  Edit it, then run [bold]clixz manifest[/bold] to publish.")
 
 
 @meta_app.command("validate")
@@ -1331,10 +1331,10 @@ def show_config_cmd() -> None:
 def edit_cmd() -> None:
     """Edit the main configuration file."""
     ensure_root()
-    cfg_path = Path("/etc/coxyz/config.yaml")
+    cfg_path = Path("/etc/clixz/config.yaml")
     if not cfg_path.exists():
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        src = files("coxyz").joinpath("default_config.yaml")
+        src = files("clixz").joinpath("default_config.yaml")
         cfg_path.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
         console.print(f"[dim]Created {cfg_path} from bundled defaults.[/dim]")
     editor = os.environ.get("EDITOR")
@@ -1744,7 +1744,7 @@ def image_list_cmd() -> None:
 
 
 def cli_main() -> None:  # pragma: no cover
-    """Module-level entry point (also used by `python -m coxyz`)."""
+    """Module-level entry point (also used by `python -m clixz`)."""
     app()
 
 

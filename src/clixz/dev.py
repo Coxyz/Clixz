@@ -20,8 +20,8 @@ from .system import normalize_perms
 # A service is identified by its (category, service) pair.
 Service = tuple[str, str]
 
-MARKER_BEGIN = "# >>> coxyz dev (managed — do not edit by hand) >>>"
-MARKER_END = "# <<< coxyz dev (managed) <<<"
+MARKER_BEGIN = "# >>> clixz dev (managed — do not edit by hand) >>>"
+MARKER_END = "# <<< clixz dev (managed) <<<"
 
 
 # ─── Principal resolution ─────────────────────────────────────────────────────

@@ -10,16 +10,16 @@ from unittest.mock import patch
 
 import typer
 
-from coxyz import cli
-from coxyz.config import (
+from clixz import cli
+from clixz.config import (
     CategoryConfig,
     Config,
     PrincipalConfig,
     RuleConfig,
     SettingsConfig,
 )
-from coxyz.policy import Finding, ServiceReport, Severity, apply_findings
-from coxyz.system import CommandExecutionError, CommandRunner
+from clixz.policy import Finding, ServiceReport, Severity, apply_findings
+from clixz.system import CommandExecutionError, CommandRunner
 
 
 class ApplyFindingsTests(unittest.TestCase):
@@ -81,12 +81,12 @@ class ApplyFailureDisplayTests(unittest.TestCase):
 
             stderr = io.StringIO()
             with (
-                patch("coxyz.cli.ensure_root"),
-                patch("coxyz.cli.resolve_service", return_value=("apps", "svc", Path(tmp))),
-                patch("coxyz.cli.audit_category", return_value=Finding(Path(tmp), "category_dir", Severity.OK)),
-                patch("coxyz.cli.audit_service", return_value=report),
+                patch("clixz.cli.ensure_root"),
+                patch("clixz.cli.resolve_service", return_value=("apps", "svc", Path(tmp))),
+                patch("clixz.cli.audit_category", return_value=Finding(Path(tmp), "category_dir", Severity.OK)),
+                patch("clixz.cli.audit_service", return_value=report),
                 patch(
-                    "coxyz.cli.apply_findings",
+                    "clixz.cli.apply_findings",
                     side_effect=CommandExecutionError(
                         command=("mkdir", "-p", "/blocked"),
                         returncode=1,

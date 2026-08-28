@@ -7,8 +7,8 @@ from pathlib import Path
 
 import yaml
 
-from coxyz.config import PrincipalConfig
-from coxyz.dev import (
+from clixz.config import PrincipalConfig
+from clixz.dev import (
     MARKER_BEGIN,
     MARKER_END,
     acl_disable_cmds,

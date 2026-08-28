@@ -3,12 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "coxyz-cli"
+name = "clixz"
 dynamic = ["version"]
 description = "CLI to manage Docker services under /srv/docker (ownership, permissions, ACLs)"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "coxyz" }]
+authors = [{ name = "clixz" }]
 keywords = ["docker", "acl", "permissions", "cli", "sysadmin"]
 classifiers = [
     "Environment :: Console",
@@ -27,27 +27,27 @@ dependencies = [
 release = ["bump-my-version>=0.20"]
 
 [project.urls]
-Homepage = "https://github.com/Coxyz/Checker"
-Repository = "https://github.com/Coxyz/Checker"
-Issues = "https://github.com/Coxyz/Checker/issues"
+Homepage = "https://github.com/Coxyz/Clixz"
+Repository = "https://github.com/Coxyz/Clixz"
+Issues = "https://github.com/Coxyz/Clixz/issues"
 
 [project.scripts]
-coxyz = "coxyz.cli:app"
+clixz = "clixz.cli:app"
 # Privileged daemon, started by systemd as root. Installing it as a console
 # script places its code under the root-owned venv, so the ExecStart target
 # cannot be rewritten by an application group.
-coxyz-admind = "coxyz.admind:main"
+clixz-admind = "clixz.admind:main"
 # Unprivileged gateway for the MCP container; same reasoning on the install path.
-coxyz-runnerd = "coxyz.runnerd:main"
+clixz-runnerd = "clixz.runnerd:main"
 
 [tool.setuptools.dynamic]
-version = { attr = "coxyz.__version__" }
+version = { attr = "clixz.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-coxyz = ["default_config.yaml"]
+clixz = ["default_config.yaml"]
 
 # `make release` drives this: bumps the version, commits, and creates a vX.Y.Z
 # tag. Pushing that tag triggers .github/workflows/publish.yml → PyPI.
@@ -61,6 +61,6 @@ tag_name = "v{new_version}"
 tag_message = "Release v{new_version}"
 
 [[tool.bumpversion.files]]
-filename = "src/coxyz/__init__.py"
+filename = "src/clixz/__init__.py"
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'

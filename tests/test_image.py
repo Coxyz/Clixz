@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from coxyz.config import (
+from clixz.config import (
     CategoryConfig,
     Config,
     ExternalDirConfig,
@@ -20,8 +20,8 @@ from coxyz.config import (
     SettingsConfig,
     _parse_config,
 )
-from coxyz.image import dockerfile_template, validate_image_name
-from coxyz.policy import Severity, apply_findings, audit_external_dir
+from clixz.image import dockerfile_template, validate_image_name
+from clixz.policy import Severity, apply_findings, audit_external_dir
 
 
 def _self_user() -> str:
@@ -45,7 +45,7 @@ def _config(root: Path) -> Config:
 
 class ImageNameTests(unittest.TestCase):
     def test_valid_names(self) -> None:
-        for name in ("api", "api-coxyz", "my_img", "img.1", "a1"):
+        for name in ("api", "api-clixz", "my_img", "img.1", "a1"):
             validate_image_name(name)  # must not raise
 
     def test_invalid_names(self) -> None:

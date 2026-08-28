@@ -7,14 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from coxyz.config import (
+from clixz.config import (
     CategoryConfig,
     Config,
     PrincipalConfig,
     RuleConfig,
     SettingsConfig,
 )
-from coxyz.policy import (
+from clixz.policy import (
     DevOverlay,
     Severity,
     acl_set_spec,
@@ -22,7 +22,7 @@ from coxyz.policy import (
     audit_service,
     desired_acl,
 )
-from coxyz.system import (
+from clixz.system import (
     Acl,
     detect_acl_support,
     mode_to_perms,
@@ -329,7 +329,7 @@ class DevAwareAuditIntegrationTests(unittest.TestCase):
             self.tmp.cleanup()
             self.skipTest("filesystem has no ACL support")
         # config_dir/data_dir carry no rule ACL — only the dev overlay (matches
-        # the real config where dev access is managed entirely by `coxyz dev`).
+        # the real config where dev access is managed entirely by `clixz dev`).
         self.cfg = Config(
             root_dir=self.root,
             settings=SettingsConfig(

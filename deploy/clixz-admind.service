@@ -1,19 +1,19 @@
 [Unit]
-Description=coxyz privileged admin daemon (create / update / archive)
-Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
-Requires=coxyz-admind.socket
-After=coxyz-admind.socket
+Description=clixz privileged admin daemon (create / update / archive)
+Documentation=file:/opt/repos/clixz-cli/deploy/README.md
+Requires=clixz-admind.socket
+After=clixz-admind.socket
 
 [Service]
 Type=simple
 # Root is genuinely required: create and archive chown to the svc_* accounts and
 # set ACLs (CAP_CHOWN + CAP_FOWNER). The capability set below is narrowed to
 # exactly that, so "root" here is far from full root.
-ExecStart=/opt/pipx/venvs/coxyz-cli/bin/coxyz-admind
+ExecStart=/opt/pipx/venvs/clixz/bin/clixz-admind
 Environment=PYTHONUNBUFFERED=1
 # The only uid allowed to drive this daemon. Must match the account running
-# coxyz-runnerd; set it after creating svc_mcprun.
-Environment=COXYZ_ADMIN_ALLOWED_UID=993
+# clixz-runnerd; set it after creating svc_mcprun.
+Environment=CLIXZ_ADMIN_ALLOWED_UID=993
 
 # Stop when idle: the root process only exists while work is in flight.
 # (Remove if you would rather keep it resident.)
@@ -41,10 +41,10 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
-# The daemon writes only where services live and where it logs. /etc/coxyz stays
+# The daemon writes only where services live and where it logs. /etc/clixz stays
 # read-only: it must never rewrite the rules it enforces.
 ReadWritePaths=/srv/docker /var/log
-ReadOnlyPaths=/etc/coxyz
+ReadOnlyPaths=/etc/clixz
 
 Restart=on-failure
 RestartSec=5

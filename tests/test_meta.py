@@ -11,8 +11,8 @@ import unittest
 
 import yaml
 
-from coxyz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
-from coxyz.meta import (
+from clixz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
+from clixz.meta import (
     SERVICE_FILENAME,
     build_manifest,
     parse_meta,
@@ -57,7 +57,7 @@ class ParseMetaTests(unittest.TestCase):
         raw = {
             "name": "Bitwarden", "icon": "🔐",
             "description": "Vault", "public": True,
-            "url": "https://vault.coxyz.fr",
+            "url": "https://vault.clixz.fr",
             "details": {"summary": "secrets", "ports": ["80 interne"], "depends_on": ["npm"]},
         }
         meta, issues = parse_meta(raw, "apps", "bitwarden")
@@ -126,7 +126,7 @@ class BuildManifestTests(unittest.TestCase):
             root = Path(tmp)
             _write_service(root, "bitwarden", yaml.safe_dump({
                 "name": "Bitwarden", "icon": "🔐", "description": "vault",
-                "public": True, "url": "https://vault.coxyz.fr",
+                "public": True, "url": "https://vault.clixz.fr",
             }))
             _write_service(root, "api", yaml.safe_dump({
                 "name": "API", "icon": "⚡", "description": "rest",

@@ -1,6 +1,6 @@
-# coxyz
+# clixz
 
-CLI to manage Docker services under `/srv/docker` following coxyz rules
+CLI to manage Docker services under `/srv/docker` following clixz rules
 (ownership, permissions, POSIX ACLs).
 
 Replaces `check_fix_permission.zsh` + `services.zsh` with a single typed Python
@@ -8,33 +8,33 @@ tool driven by a YAML configuration.
 
 ## Install
 
-coxyz is published on PyPI as the [`coxyz-cli`](https://pypi.org/project/coxyz-cli/)
-package — the installed command stays `coxyz`. It needs root for most operations
+clixz is published on PyPI as the [`clixz`](https://pypi.org/project/clixz/)
+package — the installed command stays `clixz`. It needs root for most operations
 (`chown` / `setfacl`), so install it **system-wide**. Commands that need root
 re-exec themselves through `sudo` automatically — you no longer have to prefix
-them yourself (set `COXYZ_NO_SUDO=1` to opt out, e.g. in containers running as
+them yourself (set `CLIXZ_NO_SUDO=1` to opt out, e.g. in containers running as
 root).
 
 ```bash
 sudo apt install -y pipx
 
 # Install into an isolated venv under /opt, with the binary on the system PATH.
-sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install coxyz-cli
+sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install clixz
 ```
 
-> With pipx ≥ 1.5 you can use the shorter `sudo pipx install --global coxyz-cli`
+> With pipx ≥ 1.5 you can use the shorter `sudo pipx install --global clixz`
 > instead. Debian 12 ships pipx 1.4.3, which needs the `env` form above.
 
 Then run:
 
 ```bash
-coxyz check
+clixz check
 ```
 
 Optionally enable shell completion for your user (no sudo):
 
 ```bash
-coxyz --install-completion
+clixz --install-completion
 ```
 
 Once installed, completion suggests service names for commands that take a
@@ -44,31 +44,31 @@ categories for `-C/--category`, and existing images for `image remove`.
 ### Update
 
 ```bash
-sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade coxyz-cli
+sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade clixz
 ```
 
 ### Migrating from a manual install
 
-Earlier setups used hand-written `coxyz` / `coxyz-update` wrapper scripts and a
-venv in `/usr/local/libexec/coxyz`. Remove them before installing from PyPI:
+Earlier setups used hand-written `clixz` / `clixz-update` wrapper scripts and a
+venv in `/usr/local/libexec/clixz`. Remove them before installing from PyPI:
 
 ```bash
-sudo rm -f  /usr/local/bin/coxyz /usr/local/bin/coxyz-update
-sudo rm -rf /usr/local/libexec/coxyz
-rm -f ~/.zsh/completions/_coxyz ~/.zcompdump*   # stale completion artefacts
+sudo rm -f  /usr/local/bin/clixz /usr/local/bin/clixz-update
+sudo rm -rf /usr/local/libexec/clixz
+rm -f ~/.zsh/completions/_clixz ~/.zsh/completions/_coxyz ~/.zcompdump*   # stale completion artefacts (incl. pre-rename)
 ```
 
-(`/etc/coxyz/config.yaml` is kept — it is your configuration, not part of the
+(`/etc/clixz/config.yaml` is kept — it is your configuration, not part of the
 install.)
 
 ## Configuration
 
-`coxyz` reads, in order: `--config FILE`, `/etc/coxyz/config.yaml`,
-`~/.config/coxyz/config.yaml`, then the bundled defaults.
+`clixz` reads, in order: `--config FILE`, `/etc/clixz/config.yaml`,
+`~/.config/clixz/config.yaml`, then the bundled defaults.
 
 ```bash
-coxyz show-config       # inspect the resolved config
-coxyz edit              # create/edit /etc/coxyz/config.yaml (seeded from defaults)
+clixz show-config       # inspect the resolved config
+clixz edit              # create/edit /etc/clixz/config.yaml (seeded from defaults)
 ```
 
 Example excludes in `config.yaml`:
@@ -82,43 +82,43 @@ exclude:
 ## Commands
 
 ```bash
-coxyz list                      # list services with image, ports, status
-coxyz list -C apps              # filter by category
+clixz list                      # list services with image, ports, status
+clixz list -C apps              # filter by category
 
-coxyz check                     # validate config + audit all services (exit 1 on drift)
-coxyz check bitwarden           # audit one service
-coxyz check apps/bitwarden -v   # verbose (show OK findings too)
+clixz check                     # validate config + audit all services (exit 1 on drift)
+clixz check bitwarden           # audit one service
+clixz check apps/bitwarden -v   # verbose (show OK findings too)
 
-coxyz apply                     # preview planned fixes, confirm, then apply
-coxyz apply bitwarden -y
+clixz apply                     # preview planned fixes, confirm, then apply
+clixz apply bitwarden -y
 
-coxyz create                    # interactive prompts, confirm, then create
-coxyz create -C apps -n myapp -y
+clixz create                    # interactive prompts, confirm, then create
+clixz create -C apps -n myapp -y
 
-coxyz manifest                  # aggregate every service.yaml → API manifest
-coxyz manifest --dry-run        # validate + preview without writing
-coxyz meta scaffold apps/nginx  # add a service.yaml template to an existing service
-coxyz meta validate             # validate all service.yaml descriptors
+clixz manifest                  # aggregate every service.yaml → API manifest
+clixz manifest --dry-run        # validate + preview without writing
+clixz meta scaffold apps/nginx  # add a service.yaml template to an existing service
+clixz meta validate             # validate all service.yaml descriptors
 
-coxyz dev add apps/nginx        # make a service editable via code-server
-coxyz dev remove apps/nginx     # revoke it
-coxyz dev list                  # show dev-enabled services
+clixz dev add apps/nginx        # make a service editable via code-server
+clixz dev remove apps/nginx     # revoke it
+clixz dev list                  # show dev-enabled services
 
-coxyz image add api             # scaffold a self-built image context in /opt/images
-coxyz image remove api          # delete an image build context
-coxyz image list                # list image build contexts
+clixz image add api             # scaffold a self-built image context in /opt/images
+clixz image remove api          # delete an image build context
+clixz image list                # list image build contexts
 
-coxyz show-config               # print resolved config
-coxyz edit                      # edit /etc/coxyz/config.yaml
+clixz show-config               # print resolved config
+clixz edit                      # edit /etc/clixz/config.yaml
 ```
 
-Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
+Most operations require root (`chown` / `setfacl`). clixz elevates itself with
 `sudo` automatically when needed, so the examples above work without a prefix
-(use `COXYZ_NO_SUDO=1` to disable auto-elevation).
+(use `CLIXZ_NO_SUDO=1` to disable auto-elevation).
 
 ## How it works
 
-- **Config** (`/etc/coxyz/config.yaml` or bundled default) defines:
+- **Config** (`/etc/clixz/config.yaml` or bundled default) defines:
   - root dir, ACL principals, authorized categories
   - `exclude` glob patterns to ignore paths during audit/apply
   - per-path rules: mode, ACL perms, optional owner override, audit-only flag
@@ -140,7 +140,7 @@ Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
   perms + ACL. It does not template `compose.yaml` — you fill it in. Then it
   refreshes the dashboard manifest.
 - **`service.yaml`** (dashboard descriptor): a per-service file describing how
-  the service appears on the coxyz dashboard — `name`, `icon`, `description`,
+  the service appears on the clixz dashboard — `name`, `icon`, `description`,
   `public` (true ⇒ exposed by the API, false ⇒ hidden entirely), optional
   `url`/`kind`/`container`/`tags`, and a `details:` block (summary, features,
   internal `ports`, `depends_on`, `tech`). Put only **non-sensitive** info here.
@@ -148,7 +148,7 @@ Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
 - **`manifest`**: reads every `service.yaml`, validates it, and aggregates the
   **public** ones into the JSON file at `api.manifest`
   (default `/srv/docker/apps/api/data/manifest.json`, mode `644`), which the
-  coxyz-api container mounts read-only and serves at `/api/services`. Private
+  clixz-api container mounts read-only and serves at `/api/services`. Private
   descriptors never reach the manifest.
 - **`meta scaffold <service>`**: drops a `service.yaml` template into an existing
   service (won't overwrite). **`meta validate`**: validates descriptors only.
@@ -183,7 +183,7 @@ Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
 
   ```bash
   # Build with Komodo (or the CLI): context = the image's own directory.
-  docker build -t api-coxyz:latest /opt/images/api
+  docker build -t api-clixz:latest /opt/images/api
   ```
 - **`list`**: parses each `compose.yaml` for image/ports and runs an audit
   to show a compliance status.
@@ -193,7 +193,7 @@ Most operations require root (`chown` / `setfacl`). coxyz elevates itself with
   a default ACL so new files inherit it), and mounts both dirs into the
   code-server compose under `/workspace/services/<category>/<service>/`. `remove`
   revokes *only* that group's ACL entry and unmounts. The managed mounts live in
-  a marker-delimited block (`# >>> coxyz dev ... >>>`) that is the single source
+  a marker-delimited block (`# >>> clixz dev ... >>>`) that is the single source
   of truth — `list` reads it; everything else in the compose is left untouched.
   Configured under the `dev:` key in `config.yaml`.
 
@@ -205,7 +205,7 @@ octal mode) and the named entries together. `setfacl` then recomputes the ACL
 *mask* as the union of the owning group and every named entry, so each entry
 stays fully effective — `getfacl` never shows an `#effective:` restriction.
 
-`coxyz` deliberately never runs `chmod` on an ACL-managed path: a `chmod` after
+`clixz` deliberately never runs `chmod` on an ACL-managed path: a `chmod` after
 a `setfacl` would rewrite the mask instead of the group bits and silently shrink
 the effective rights of every named entry.
 
@@ -232,6 +232,6 @@ make build      # build sdist + wheel into dist/
 make release    # tag the current version and push (CI publishes to PyPI)
 ```
 
-Releasing: bump `__version__` in `src/coxyz/__init__.py`, commit, then
+Releasing: bump `__version__` in `src/clixz/__init__.py`, commit, then
 `make release`. The tag `vX.Y.Z` triggers `.github/workflows/publish.yml`,
 which publishes to PyPI via Trusted Publishing.

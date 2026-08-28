@@ -180,7 +180,7 @@ class NamedAclEntry:
 class DevOverlay:
     """The extra ACL a *dev-enabled* service carries on its ``config/`` and ``data/``.
 
-    ``coxyz dev add`` grants the dev principal a recursive ``rwX`` ACL (plus a
+    ``clixz dev add`` grants the dev principal a recursive ``rwX`` ACL (plus a
     default ACL so new files inherit it). The audit must treat that entry — and
     the default ACL — as *expected* on a dev-enabled service, not as drift.
     """
@@ -214,8 +214,8 @@ def desired_acl(
     """The :class:`Acl` an ACL-managed path should end up with.
 
     Overlays add a recursive named entry plus a default ACL on a service's
-    ``config/``/``data/``: ``dev`` (the ``coxyz dev`` principal, rwX) and
-    ``build`` (the komodo principal granted read access for ``coxyz build``).
+    ``config/``/``data/``: ``dev`` (the ``clixz dev`` principal, rwX) and
+    ``build`` (the komodo principal granted read access for ``clixz build``).
     An overlay's entry overrides any rule entry for the same principal.
     """
     user, group, other = mode_to_perms(rule.mode)
@@ -463,7 +463,7 @@ def _setfacl_modify_base_cmd(path: Path, rule: RuleConfig, config: Config) -> li
 
     Uses ``-m`` (modify) rather than ``--set``/``-b`` so the dev principal's
     recursive entry and the default ACL survive — those are owned by
-    ``coxyz dev``, not the rule.
+    ``clixz dev``, not the rule.
     """
     return ["setfacl", "-m", acl_set_spec(rule, config), str(path)]
 
@@ -475,7 +475,7 @@ def _audit_overlay_acl(
 ) -> None:
     """Audit an overlaid ``config/``/``data/`` path: base mode + overlay ACL(s) + default.
 
-    Overlays: ``dev`` (coxyz dev principal) and/or ``build`` (komodo, for a
+    Overlays: ``dev`` (clixz dev principal) and/or ``build`` (komodo, for a
     build-enabled service). Reconciliation is non-destructive — fix the base
     mode, then (re)grant each overlay recursively with its default ACL, never
     wiping it with ``--set``/``-b``.
@@ -595,7 +595,7 @@ def audit_service(
         ))
 
     # service.yaml — dashboard descriptor. Audited for permissions only here;
-    # `coxyz manifest`/`check` validates its *contents*. A missing one is a
+    # `clixz manifest`/`check` validates its *contents*. A missing one is a
     # soft warning (a service simply won't appear on the dashboard).
     service_file = svc_path / "service.yaml"
     if service_file.is_file():

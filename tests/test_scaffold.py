@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from coxyz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
-from coxyz.scaffold import CreateRequest, create_service, validate_service_name
+from clixz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
+from clixz.scaffold import CreateRequest, create_service, validate_service_name
 
 
 def _self_user() -> str:

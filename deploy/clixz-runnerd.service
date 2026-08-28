@@ -1,8 +1,8 @@
 [Unit]
-Description=coxyz gateway for the MCP server (read-only, relays mutations)
-Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
-After=network.target coxyz-admind.socket
-Wants=coxyz-admind.socket
+Description=clixz gateway for the MCP server (read-only, relays mutations)
+Documentation=file:/opt/repos/clixz-cli/deploy/README.md
+After=network.target clixz-admind.socket
+Wants=clixz-admind.socket
 
 [Service]
 Type=simple
@@ -14,15 +14,15 @@ User=svc_mcprun
 Group=svc_mcprun
 SupplementaryGroups=svc_apps svc_automation svc_infra svc_monitoring svc_network
 
-ExecStart=/opt/pipx/venvs/coxyz-cli/bin/coxyz-runnerd
-Environment=COXYZ_RUNNER_SOCKET=/run/coxyz-runner/coxyz-runner.sock
-Environment=COXYZ_ADMIN_SOCKET=/run/coxyz-admin/coxyz-admin.sock
+ExecStart=/opt/pipx/venvs/clixz/bin/clixz-runnerd
+Environment=CLIXZ_RUNNER_SOCKET=/run/clixz-runner/clixz-runner.sock
+Environment=CLIXZ_ADMIN_SOCKET=/run/clixz-admin/clixz-admin.sock
 Environment=PYTHONUNBUFFERED=1
 
-# /run/coxyz-runner, created by systemd. 0750 so the MCP container (which
+# /run/clixz-runner, created by systemd. 0750 so the MCP container (which
 # carries the svc_mcprun GID) can traverse and open the socket without being
 # able to create anything in the directory.
-RuntimeDirectory=coxyz-runner
+RuntimeDirectory=clixz-runner
 RuntimeDirectoryMode=0750
 # Preserve is not a detail: this directory is bind-mounted into the MCP
 # container. Systemd's default removes and recreates it on every restart, which
@@ -51,7 +51,7 @@ SystemCallFilter=@system-service
 CapabilityBoundingSet=
 
 # Reads the service tree; writes nothing. Mutations go through admind.
-ReadOnlyPaths=/srv/docker /etc/coxyz
+ReadOnlyPaths=/srv/docker /etc/clixz
 
 Restart=on-failure
 RestartSec=5

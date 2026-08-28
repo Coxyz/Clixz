@@ -10,7 +10,7 @@ the only bridge, and it is narrow on purpose:
 - read-only commands come from a **closed allowlist** and every argument is
   regex-checked; nothing reaches a shell;
 - mutating commands are **not executed here at all**. They are relayed, as
-  typed JSON, to :mod:`coxyz.admind`, which holds the narrow set of capabilities
+  typed JSON, to :mod:`clixz.admind`, which holds the narrow set of capabilities
   they require. This daemon cannot chown, cannot setfacl, cannot delete.
 
 The split matters: an escape in this process yields an account that can read the
@@ -34,10 +34,12 @@ import socketserver
 import subprocess
 import sys
 
-COXYZ_BIN = os.environ.get("COXYZ_BIN", "/opt/pipx/venvs/coxyz-cli/bin/coxyz")
-SOCKET_PATH = os.environ.get("COXYZ_RUNNER_SOCKET", "/run/coxyz-runner/coxyz-runner.sock")
-ADMIN_SOCKET = os.environ.get("COXYZ_ADMIN_SOCKET", "/run/coxyz-admin/coxyz-admin.sock")
-TIMEOUT = int(os.environ.get("COXYZ_RUNNER_TIMEOUT", "60"))
+from . import compat
+
+CLIXZ_BIN = compat.env("BIN", "/opt/pipx/venvs/clixz/bin/clixz")
+SOCKET_PATH = compat.env("RUNNER_SOCKET", "/run/clixz-runner/clixz-runner.sock")
+ADMIN_SOCKET = compat.env("ADMIN_SOCKET", "/run/clixz-admin/clixz-admin.sock")
+TIMEOUT = int(compat.env("RUNNER_TIMEOUT", "60"))
 MAX_OUTPUT = 256 * 1024
 MAX_REQUEST = 256 * 1024
 
@@ -59,7 +61,7 @@ def _build_argv(req: dict) -> list[str]:
     cmd = req.get("cmd")
 
     if cmd == "check":
-        argv = [COXYZ_BIN, "check"]
+        argv = [CLIXZ_BIN, "check"]
         service = req.get("service")
         if service:
             # Require a real string: str(42) would satisfy the regex, so a
@@ -72,7 +74,7 @@ def _build_argv(req: dict) -> list[str]:
         return argv
 
     if cmd == "list":
-        argv = [COXYZ_BIN, "list"]
+        argv = [CLIXZ_BIN, "list"]
         category = req.get("category")
         if category:
             if not isinstance(category, str) or not _CATEGORY_RE.match(category):
@@ -98,7 +100,7 @@ def _run(argv: list[str]) -> dict:
                  "TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "100",
                  # Never let a read-only command try to escalate: without this
                  # ensure_root() would re-exec through sudo.
-                 "COXYZ_NO_SUDO": "1"},
+                 "CLIXZ_NO_SUDO": "1"},
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"timed out after {TIMEOUT}s"}
@@ -144,7 +146,7 @@ def _relay(req: dict) -> dict:
     except OSError as exc:
         return {"ok": False, "error": (
             f"privileged daemon unreachable ({ADMIN_SOCKET}): {exc}. "
-            "Is coxyz-admind.socket started?"
+            "Is clixz-admind.socket started?"
         )}
     raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
     if not raw:
@@ -170,7 +172,7 @@ class Handler(socketserver.StreamRequestHandler):
             resp = {"ok": False, "error": f"reading the request: {exc}"}
         else:
             if req.get("cmd") in RELAYED:
-                print(f"[coxyz-runnerd] relay {req.get('cmd')} {req.get('action', '')}",
+                print(f"[clixz-runnerd] relay {req.get('cmd')} {req.get('action', '')}",
                       flush=True)
                 resp = _relay(req)
             else:
@@ -179,7 +181,7 @@ class Handler(socketserver.StreamRequestHandler):
                 except ValueError as exc:
                     resp = {"ok": False, "error": str(exc)}
                 else:
-                    print(f"[coxyz-runnerd] {' '.join(argv[1:])}", flush=True)
+                    print(f"[clixz-runnerd] {' '.join(argv[1:])}", flush=True)
                     resp = _run(argv)
         try:
             self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
@@ -194,9 +196,9 @@ class Server(socketserver.ThreadingUnixStreamServer):
 
 def main() -> None:
     if os.geteuid() == 0:
-        sys.exit("[coxyz-runnerd] refusing to run as root: use the svc_mcprun account.")
-    if not os.path.exists(COXYZ_BIN):
-        sys.exit(f"[coxyz-runnerd] binary not found: {COXYZ_BIN}")
+        sys.exit("[clixz-runnerd] refusing to run as root: use the svc_mcprun account.")
+    if not os.path.exists(CLIXZ_BIN):
+        sys.exit(f"[clixz-runnerd] binary not found: {CLIXZ_BIN}")
 
     os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
     if os.path.exists(SOCKET_PATH):
@@ -206,7 +208,7 @@ def main() -> None:
     # 0660: the owner and its group. The MCP container carries that GID as a
     # supplementary group, so it can connect — and nothing else on the host can.
     os.chmod(SOCKET_PATH, 0o660)
-    print(f"[coxyz-runnerd] listening on {SOCKET_PATH} (uid={os.geteuid()}), "
+    print(f"[clixz-runnerd] listening on {SOCKET_PATH} (uid={os.geteuid()}), "
           f"admind at {ADMIN_SOCKET}", flush=True)
     try:
         server.serve_forever()

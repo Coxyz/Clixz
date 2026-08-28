@@ -1,12 +1,12 @@
 """Service descriptors (``service.yaml``): parse, validate, scaffold, aggregate.
 
 Every service may carry a ``service.yaml`` at its root, next to ``compose.yaml``.
-It describes how the service is presented on the coxyz dashboard — display name,
+It describes how the service is presented on the clixz dashboard — display name,
 icon, short description, public/visibility flag — plus richer, **non-sensitive**
 detail shown in the front-end popup (summary, features, internal ports, related
 services, tech stack).
 
-``coxyz manifest`` reads every descriptor, validates it, and aggregates the
+``clixz manifest`` reads every descriptor, validates it, and aggregates the
 **public** ones into a single JSON file that the API serves (and the dashboard
 renders). Private services (``public: false``) are excluded entirely — they
 never reach the manifest, so nothing about them leaks to the front-end.
@@ -207,10 +207,10 @@ def scaffold_template(category: str, service: str) -> str:
     title = service.replace("-", " ").replace("_", " ").title()
     return f"""\
 # ─────────────────────────────────────────────────────────────────────────────
-# service.yaml — coxyz service descriptor ({category}/{service})
+# service.yaml — clixz service descriptor ({category}/{service})
 #
-# Aggregated by `coxyz manifest` and served (when public) at
-# https://api.coxyz.fr/api/services for the dashboard.
+# Aggregated by `clixz manifest` and served (when public) at
+# https://api.clixz.fr/api/services for the dashboard.
 # Put only NON-SENSITIVE information here. Internal docker ports are fine.
 # ─────────────────────────────────────────────────────────────────────────────
 schema: 1
@@ -222,7 +222,7 @@ public: false                   # true = exposed by the API; false = hidden enti
 
 # kind: app | infra   (optional — defaults to "app" when a url is set, else "infra")
 # container: {service}           # Komodo/Docker container name (defaults to "{service}")
-# url: "https://{service}.coxyz.fr"   # public link; omit for internal services
+# url: "https://{service}.clixz.fr"   # public link; omit for internal services
 # tags: [example]
 
 details:

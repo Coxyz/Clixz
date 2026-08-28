@@ -1,13 +1,13 @@
 [Unit]
-Description=Socket for the coxyz privileged admin daemon
-Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
+Description=Socket for the clixz privileged admin daemon
+Documentation=file:/opt/repos/clixz-cli/deploy/README.md
 
 [Socket]
 # systemd owns the directory lifecycle; without this the parent survives
 # restarts and can drift.
-RuntimeDirectory=coxyz-admin
+RuntimeDirectory=clixz-admin
 RuntimeDirectoryMode=0755
-ListenStream=/run/coxyz-admin/coxyz-admin.sock
+ListenStream=/run/clixz-admin/clixz-admin.sock
 SocketMode=0660
 SocketUser=root
 # Only svc_mcprun may connect. The daemon re-checks the caller's uid through

@@ -15,9 +15,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from coxyz import admind
-from coxyz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
-from coxyz.spec import SPEC_FILENAME, SpecError
+from clixz import admind
+from clixz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
+from clixz.spec import SPEC_FILENAME, SpecError
 
 
 def _config(root: Path) -> Config:
@@ -59,7 +59,7 @@ class DaemonTestCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def _service(self, category: str = "apps", service: str = "demo") -> Path:
-        from coxyz.spec import render_compose, spec_from_dict, spec_json, validate
+        from clixz.spec import render_compose, spec_from_dict, spec_json, validate
 
         svc = self.root / category / service
         (svc / "data").mkdir(parents=True)

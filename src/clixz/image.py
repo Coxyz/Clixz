@@ -1,4 +1,4 @@
-"""``coxyz image``: manage self-built image build contexts under ``/opt/images``.
+"""``clixz image``: manage self-built image build contexts under ``/opt/images``.
 
 A self-built image lives in its own directory ``<images.dir>/<name>/`` holding
 the Dockerfile and sources — **separate** from the service tree under
@@ -7,7 +7,7 @@ the Dockerfile and sources — **separate** from the service tree under
 
 Each image directory follows the ``/opt/repos`` convention: owned by the dev
 principal (editable via code-server), world-readable so Komodo Periphery can
-read the build context to build. coxyz creates them with the right owner/mode
+read the build context to build. clixz creates them with the right owner/mode
 and scaffolds a Dockerfile; ``check``/``apply`` keep the owner/mode in sync.
 """
 

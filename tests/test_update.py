@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from coxyz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
-from coxyz.update import (
+from clixz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
+from clixz.update import (
     PROTECTED,
     UPDATABLE,
     UpdateRequest,

@@ -1,5 +1,5 @@
-# Default configuration for coxyz CLI
-# Override location: /etc/coxyz/config.yaml (or --config FILE)
+# Default configuration for clixz CLI
+# Override location: /etc/clixz/config.yaml (or --config FILE)
 
 root_dir: /srv/docker
 
@@ -14,7 +14,7 @@ settings:
       kind: group              # "group" or "user"
     boxyz_dev:
       name: boxyz_dev
-      kind: group              # group code-server runs as (for `coxyz dev`)
+      kind: group              # group code-server runs as (for `clixz dev`)
 
 # Authorized categories and their owning service account.
 # Format: <category>: { user: <svc_user>, group: <svc_group> }
@@ -78,13 +78,13 @@ rules:
     acl: null
     audit_only: true
 
-# `coxyz manifest` aggregates every service.yaml into this JSON file, mounted
-# read-only into the coxyz-api container and served at /api/services.
+# `clixz manifest` aggregates every service.yaml into this JSON file, mounted
+# read-only into the clixz-api container and served at /api/services.
 api:
   manifest: /srv/docker/apps/api/data/manifest.json
 
 # Self-built image build contexts (Dockerfile + sources), one dir per image.
-# `coxyz image add/remove/list` manages them; `check`/`apply` enforce owner/mode.
+# `clixz image add/remove/list` manages them; `check`/`apply` enforce owner/mode.
 # Owned by the dev principal (editable via code-server), world-readable so
 # Komodo Periphery can read the build context to build.
 # - acl: optional per-principal ACL on each subdirectory (same form as rules),
@@ -118,7 +118,7 @@ repos:
   # acl:
   #   komodo: "rx"
 
-# `coxyz dev add/remove <service>`: mount a service's config/ and data/ into
+# `clixz dev add/remove <service>`: mount a service's config/ and data/ into
 # code-server and grant the `principal` group recursive rw access on them.
 dev:
   compose: /srv/docker/apps/code-boxyz/compose.yaml   # code-server compose to edit

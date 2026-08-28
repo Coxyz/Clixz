@@ -238,7 +238,7 @@ def detect_acl_support(root_dir: Path) -> bool:
             continue
         try:
             with tempfile.NamedTemporaryFile(
-                dir=base, prefix=".coxyz-acl-probe.", delete=False,
+                dir=base, prefix=".clixz-acl-probe.", delete=False,
             ) as handle:
                 probe = Path(handle.name)
         except OSError:

@@ -3,8 +3,8 @@ name: Publish to PyPI
 # Publishes to PyPI when a version tag (vX.Y.Z) is pushed.
 # Authentication uses PyPI Trusted Publishing (OIDC) — no API token needed.
 # One-time setup on PyPI — add a Trusted Publisher with:
-#   PyPI project name: coxyz-cli   (must match `name` in pyproject.toml)
-#   Owner: Coxyz   Repository: Checker   Workflow: publish.yml   Environment: (blank)
+#   PyPI project name: clixz   (must match `name` in pyproject.toml)
+#   Owner: Coxyz   Repository: Clixz   Workflow: publish.yml   Environment: (blank)
 
 on:
   push:
@@ -26,10 +26,10 @@ jobs:
       - name: Check tag matches package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pkg="$(python -c 'import sys; sys.path.insert(0, "src"); import coxyz; print(coxyz.__version__)')"
+          pkg="$(python -c 'import sys; sys.path.insert(0, "src"); import clixz; print(clixz.__version__)')"
           echo "tag=$tag  package=$pkg"
           if [ "$tag" != "$pkg" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match coxyz.__version__ ($pkg)"
+            echo "::error::Tag $GITHUB_REF_NAME does not match clixz.__version__ ($pkg)"
             exit 1
           fi
 

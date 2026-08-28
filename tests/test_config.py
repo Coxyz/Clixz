@@ -1,10 +1,10 @@
-"""Tests for config structural validation (used by `coxyz check`)."""
+"""Tests for config structural validation (used by `clixz check`)."""
 
 from __future__ import annotations
 
 import unittest
 
-from coxyz.config import validate_config
+from clixz.config import validate_config
 
 _REQUIRED_RULES = ["category_dir", "service_dir", "compose_file", "config_dir", "data_dir", "env_file"]
 
@@ -60,7 +60,7 @@ class ValidateConfigTests(unittest.TestCase):
         )
 
     def test_dev_nested_under_settings_is_flagged(self) -> None:
-        # The exact mistake that broke `coxyz dev`: dev indented under settings.
+        # The exact mistake that broke `clixz dev`: dev indented under settings.
         cfg = _good()
         cfg["settings"]["dev"] = {"principal": "dev"}
         issues = validate_config(cfg)

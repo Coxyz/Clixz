@@ -4,7 +4,7 @@ Why a daemon rather than a sudoers rule
 ---------------------------------------
 ``create`` and ``archive`` chown to the ``svc_*`` accounts and set ACLs, so they
 need ``CAP_CHOWN``/``CAP_FOWNER``. The obvious alternative — a ``sudoers`` entry
-— is worse: a wildcard like ``coxyz create *`` matches spaces, so it silently
+— is worse: a wildcard like ``clixz create *`` matches spaces, so it silently
 authorises every option the CLI will ever grow (``--config /tmp/evil.yaml``…).
 sudo's wildcards are not an argument validator. Here the contract is a typed
 JSON message, so the whole class of argument-injection bugs does not exist.
@@ -22,7 +22,7 @@ a human and then apply content B — the plan/confirm pattern is worthless if th
 confirmation is not bound to what was reviewed.
 
 Callers are authenticated by ``SO_PEERCRED`` (kernel-provided uid), not by the
-socket mode alone, and must match ``COXYZ_ADMIN_ALLOWED_UID``.
+socket mode alone, and must match ``CLIXZ_ADMIN_ALLOWED_UID``.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import compat
 from .archive import archive_service, snapshot_file
 from .config import load_config
 from .policy import resolve_service
@@ -56,9 +57,9 @@ from .spec import (
 )
 from .system import CommandRunner, detect_acl_support, principal_exists
 
-SOCKET_PATH = os.environ.get("COXYZ_ADMIN_SOCKET", "/run/coxyz-admin/coxyz-admin.sock")
-AUDIT_LOG = Path(os.environ.get("COXYZ_ADMIN_LOG", "/var/log/coxyz-admind.log"))
-PLAN_TTL = int(os.environ.get("COXYZ_ADMIN_PLAN_TTL", "300"))
+SOCKET_PATH = compat.env("ADMIN_SOCKET", "/run/clixz-admin/clixz-admin.sock")
+AUDIT_LOG = Path(compat.env("ADMIN_LOG", "/var/log/clixz-admind.log"))
+PLAN_TTL = int(compat.env("ADMIN_PLAN_TTL", "300"))
 MAX_REQUEST = 256 * 1024
 MAX_PLANS = 32
 MAX_HASH_ATTEMPTS = 3
@@ -92,9 +93,9 @@ def _audit(event: str, **fields: Any) -> None:
         with AUDIT_LOG.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:
-        print(f"[coxyz-admind] (audit write failed) {line}", flush=True)
+        print(f"[clixz-admind] (audit write failed) {line}", flush=True)
     else:
-        print(f"[coxyz-admind] {line}", flush=True)
+        print(f"[clixz-admind] {line}", flush=True)
 
 
 # ─── plan store ───────────────────────────────────────────────────────────────
@@ -332,7 +333,7 @@ def _peer_uid(sock: socket.socket) -> int:
 
 
 def _allowed_uid() -> int | None:
-    raw = os.environ.get("COXYZ_ADMIN_ALLOWED_UID", "").strip()
+    raw = compat.env("ADMIN_ALLOWED_UID")
     return int(raw) if raw else None
 
 
@@ -407,7 +408,7 @@ def _inherited_socket() -> socket.socket | None:
 
 def main() -> None:
     if os.geteuid() != 0:
-        sys.exit("[coxyz-admind] must run as root (it chowns and sets ACLs).")
+        sys.exit("[clixz-admind] must run as root (it chowns and sets ACLs).")
 
     inherited = _inherited_socket()
     if inherited is None:
@@ -418,9 +419,9 @@ def main() -> None:
         # cheaper to diagnose.
         if os.path.exists(SOCKET_PATH):
             sys.exit(
-                f"[coxyz-admind] {SOCKET_PATH} already exists and no socket was "
+                f"[clixz-admind] {SOCKET_PATH} already exists and no socket was "
                 "passed by systemd. Refusing to replace it — start the unit via "
-                "coxyz-admind.socket, or remove that path if it is stale."
+                "clixz-admind.socket, or remove that path if it is stale."
             )
         os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
         server = Server(SOCKET_PATH, Handler)

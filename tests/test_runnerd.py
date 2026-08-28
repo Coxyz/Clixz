@@ -9,7 +9,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from coxyz import runnerd
+from clixz import runnerd
 
 
 class AllowlistTests(unittest.TestCase):
@@ -59,7 +59,7 @@ class RelayTests(unittest.TestCase):
         with mock.patch.object(runnerd, "ADMIN_SOCKET", "/nonexistent/admin.sock"):
             resp = runnerd._relay({"cmd": "plan", "action": "update", "service": "x"})
         self.assertFalse(resp["ok"])
-        self.assertIn("coxyz-admind", resp["error"])
+        self.assertIn("clixz-admind", resp["error"])
 
     def test_relay_renames_cmd_to_op(self) -> None:
         captured: dict = {}
@@ -84,7 +84,7 @@ class RelayTests(unittest.TestCase):
 
 class EnvironmentTests(unittest.TestCase):
     def test_subprocess_env_disables_sudo_escalation(self) -> None:
-        # Without COXYZ_NO_SUDO, ensure_root() would try to re-exec via sudo.
+        # Without CLIXZ_NO_SUDO, ensure_root() would try to re-exec via sudo.
         captured: dict = {}
 
         def fake_run(argv, **kwargs):
@@ -93,7 +93,7 @@ class EnvironmentTests(unittest.TestCase):
 
         with mock.patch.object(runnerd.subprocess, "run", fake_run):
             runnerd._run(["/bin/true", "check"])
-        self.assertEqual(captured["env"]["COXYZ_NO_SUDO"], "1")
+        self.assertEqual(captured["env"]["CLIXZ_NO_SUDO"], "1")
         self.assertFalse(captured["shell"])
 
 

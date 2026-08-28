@@ -3,6 +3,10 @@ Description=Socket for the coxyz privileged admin daemon
 Documentation=file:/opt/repos/coxyz-cli/deploy/README.md
 
 [Socket]
+# systemd owns the directory lifecycle; without this the parent survives
+# restarts and can drift.
+RuntimeDirectory=coxyz-admin
+RuntimeDirectoryMode=0755
 ListenStream=/run/coxyz-admin/coxyz-admin.sock
 SocketMode=0660
 SocketUser=root

@@ -393,9 +393,18 @@ def main() -> None:
 
     inherited = _inherited_socket()
     if inherited is None:
-        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+        # Never adopt a path we did not create. Unlinking here would silently
+        # destroy the socket systemd is listening on: systemd keeps its bound
+        # fd, still reports "listening", and every subsequent client gets
+        # ENOENT — a failure with no visible cause. Refusing is louder and
+        # cheaper to diagnose.
         if os.path.exists(SOCKET_PATH):
-            os.unlink(SOCKET_PATH)
+            sys.exit(
+                f"[coxyz-admind] {SOCKET_PATH} already exists and no socket was "
+                "passed by systemd. Refusing to replace it — start the unit via "
+                "coxyz-admind.socket, or remove that path if it is stale."
+            )
+        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
         server = Server(SOCKET_PATH, Handler)
         os.chmod(SOCKET_PATH, 0o660)
     else:

@@ -19,11 +19,17 @@ Environment=COXYZ_RUNNER_SOCKET=/run/coxyz-runner/coxyz-runner.sock
 Environment=COXYZ_ADMIN_SOCKET=/run/coxyz-admin/coxyz-admin.sock
 Environment=PYTHONUNBUFFERED=1
 
-# /run/coxyz-runner, created and cleaned by systemd. 0750 so the MCP container
-# (which carries the svc_mcprun GID) can traverse and open the socket without
-# being able to create anything in the directory.
+# /run/coxyz-runner, created by systemd. 0750 so the MCP container (which
+# carries the svc_mcprun GID) can traverse and open the socket without being
+# able to create anything in the directory.
 RuntimeDirectory=coxyz-runner
 RuntimeDirectoryMode=0750
+# Preserve is not a detail: this directory is bind-mounted into the MCP
+# container. Systemd's default removes and recreates it on every restart, which
+# leaves the container's mount pointing at a deleted inode — the socket then
+# vanishes from inside the container, silently and permanently, until the
+# container itself is recreated. Preserving keeps the inode stable.
+RuntimeDirectoryPreserve=yes
 
 NoNewPrivileges=yes
 PrivateTmp=yes

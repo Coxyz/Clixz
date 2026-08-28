@@ -47,13 +47,16 @@ class ArchiveTests(unittest.TestCase):
                 (result.destination / "data" / "db.sqlite").read_text(encoding="utf-8"), "payload"
             )
 
-    def test_archive_root_is_not_world_readable(self) -> None:
+    def test_archive_root_is_readable_but_root_owned(self) -> None:
+        # Readable on purpose: an operator must be able to see what was
+        # archived without sudo. Secrets stay protected by their own mode —
+        # mv preserves permissions, so an archived .env keeps 600 root:root.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _service(root)
             archive_service(_config(root), "apps", "demo", dry_run=False)
             mode = archive_root(_config(root)).stat().st_mode & 0o777
-            self.assertEqual(mode, 0o700)
+            self.assertEqual(mode, 0o755)
 
     def test_archive_dir_is_hidden_from_category_discovery(self) -> None:
         # `.archive` is a dotted name and not a configured category, so the

@@ -15,9 +15,11 @@ Layout under ``<root_dir>/.archive/`` ::
 discovery walk never sees it: archived services disappear from ``list`` and
 ``check`` without needing an exclusion rule.
 
-The archive root is ``700 root:root``. Archived trees carry the ``.env`` of a
-former service, so they must be no more readable than the original — locking
-the root down covers every descendant regardless of its own mode.
+The archive root is ``755 root:root``: owned by root so nothing but the daemon
+writes there, but readable so an operator can see what was archived without
+sudo. Secrets are not exposed by this — ``mv`` preserves permissions, so an
+archived ``.env`` keeps its own ``600 root:root``. Locking the root down to
+``700`` as well was redundant belt-and-braces that mostly got in the way.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from .config import Config
 from .system import CommandRunner
 
 ARCHIVE_DIRNAME = ".archive"
-ARCHIVE_MODE = "700"
+ARCHIVE_MODE = "755"
 ARCHIVE_OWNER = "root:root"
 
 
@@ -52,7 +54,12 @@ def archive_root(config: Config) -> Path:
 
 
 def _secure_root(runner: CommandRunner, config: Config) -> None:
-    """Lock the archive root down so archived ``.env`` files stay unreadable.
+    """Give the archive root to root, readable by everyone else.
+
+    Root ownership is what matters: only the privileged daemon adds to the
+    archive. Readability is deliberate — an operator should be able to see what
+    was archived without sudo, and the archived files keep their own modes, so
+    a ``.env`` in there is still ``600 root:root``.
 
     ``chown`` is skipped when unprivileged: the mutating commands run as root in
     practice, and refusing to snapshot just because the caller cannot chown

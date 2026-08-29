@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from clixz.config import PrincipalConfig
+from clixz import dev
 from clixz.dev import (
     MARKER_BEGIN,
     MARKER_END,
@@ -162,6 +163,44 @@ class PrincipalResolutionTests(unittest.TestCase):
 
     def test_resolve_unknown_returns_none(self) -> None:
         self.assertIsNone(resolve_principal(self.PRINCIPALS, "nope"))
+
+
+class LegacyMarkerTests(unittest.TestCase):
+    """A compose written before the coxyz → clixz rename must still be seen."""
+
+    def _compose(self, begin: str, end: str) -> str:
+        return (
+            "services:\n"
+            "  code:\n"
+            "    volumes:\n"
+            "      - /srv/docker/apps/code/config:/config\n"
+            f"      {begin}\n"
+            "      - /srv/docker/apps/nginx/config:/workspace/services/apps/nginx/config\n"
+            "      - /srv/docker/apps/nginx/data:/workspace/services/apps/nginx/data\n"
+            f"      {end}\n"
+        )
+
+    def test_reads_a_legacy_block(self) -> None:
+        # Missing it would leave the dev ACL undetected, so `check` reports
+        # drift and `apply` strips the ACL code-server relies on.
+        text = self._compose(dev._LEGACY_BEGIN, dev._LEGACY_END)
+        self.assertEqual(
+            read_enabled(text, Path("/srv/docker"), "/workspace/services"),
+            [("apps", "nginx")],
+        )
+
+    def test_reads_a_current_block(self) -> None:
+        text = self._compose(dev.MARKER_BEGIN, dev.MARKER_END)
+        self.assertEqual(
+            read_enabled(text, Path("/srv/docker"), "/workspace/services"),
+            [("apps", "nginx")],
+        )
+
+    def test_rewrites_a_legacy_block_with_the_current_marker(self) -> None:
+        # Read the old spelling, write only the new one: the file heals.
+        text = self._compose(dev._LEGACY_BEGIN, dev._LEGACY_END)
+        out = remove_service(text, "apps", "nginx", Path("/srv/docker"), "/workspace/services")
+        self.assertNotIn("nginx", out)
 
 
 if __name__ == "__main__":

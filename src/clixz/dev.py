@@ -23,6 +23,13 @@ Service = tuple[str, str]
 MARKER_BEGIN = "# >>> clixz dev (managed — do not edit by hand) >>>"
 MARKER_END = "# <<< clixz dev (managed) <<<"
 
+# Pre-rename markers, still present in any compose written before coxyz became
+# clixz. They are read, never written — a file heals on the next `dev add`.
+_LEGACY_BEGIN = "# >>> coxyz dev (managed — do not edit by hand) >>>"
+_LEGACY_END = "# <<< coxyz dev (managed) <<<"
+_BEGIN_MARKERS = (MARKER_BEGIN, _LEGACY_BEGIN)
+_END_MARKERS = (MARKER_END, _LEGACY_END)
+
 
 # ─── Principal resolution ─────────────────────────────────────────────────────
 
@@ -95,13 +102,19 @@ def remove_service(text: str, category: str, service: str, root_dir: Path, mount
 
 
 def _block_span(lines: list[str]) -> tuple[int, int] | None:
-    """Indices of the begin/end marker lines, or None if there is no block."""
+    """Indices of the begin/end marker lines, or None if there is no block.
+
+    Both spellings are recognised. Missing a block written before the rename is
+    not cosmetic: the dev ACL overlay goes undetected, ``check`` reports the
+    mounted service as drifted, and ``apply`` would strip the very ACL that lets
+    code-server edit it.
+    """
     begin = end = None
     for i, line in enumerate(lines):
         s = line.strip()
-        if s == MARKER_BEGIN:
+        if s in _BEGIN_MARKERS:
             begin = i
-        elif s == MARKER_END:
+        elif s in _END_MARKERS:
             end = i
     if begin is None or end is None or end < begin:
         return None

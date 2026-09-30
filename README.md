@@ -152,8 +152,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now clixz-mcpd
 make test       # run the test suite
 make lint       # ruff on src/ and tests/ (pip install -e '.[dev]')
 make build      # sdist + wheel into dist/
-make release    # tag the current version and push (CI publishes to PyPI)
+make release    # bump, tag, push and publish a GitHub release (CI publishes to PyPI)
 ```
 
-Releasing: bump `__version__` in `src/clixz/__init__.py`, commit, `make release`.
-The `vX.Y.Z` tag triggers `.github/workflows/publish.yml`.
+Releasing: `make release [PART=patch|minor|major]` bumps `__version__`, tags,
+pushes and publishes a GitHub release. The release — not the tag — triggers
+`.github/workflows/publish.yml`, so GitHub and PyPI always show the same version.

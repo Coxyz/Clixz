@@ -1,15 +1,15 @@
 name: Publish to PyPI
 
-# Publishes to PyPI when a version tag (vX.Y.Z) is pushed.
+# Publishes to PyPI when a GitHub release is published, so the two cannot
+# disagree on what the latest version is. Pushing a tag alone publishes nothing.
 # Authentication uses PyPI Trusted Publishing (OIDC) — no API token needed.
 # One-time setup on PyPI — add a Trusted Publisher with:
 #   PyPI project name: clixz   (must match `name` in pyproject.toml)
 #   Owner: Coxyz   Repository: Clixz   Workflow: publish.yml   Environment: (blank)
 
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
 
 jobs:
   publish:
@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check tag matches package version
+      - name: Check release tag matches package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(python -c 'import sys; sys.path.insert(0, "src"); import clixz; print(clixz.__version__)')"

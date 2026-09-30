@@ -1,0 +1,9 @@
+[Unit]
+Description=clixz: refresh the reverse proxy snapshot and the manifest
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

@@ -66,18 +66,24 @@ clixz ls [-C apps]              # services with image and published ports
 clixz ls --archived
 clixz show apps/atuin           # permissions, compose lint, paths, one screen
 clixz check [service]           # audit + lint. exit 1 on a permission error
-clixz exposed                   # what NPM publishes vs what service.yaml declares
+clixz exposed [--snapshot]      # what NPM publishes vs what service.yaml declares
+clixz rules                     # the compose rules in effect, and what is ignored
 
 # write  (each accepts --plan: prints what it would do, writes nothing)
 clixz new apps/myapp            # tree + hardened compose template + .env + service.yaml
 clixz fix [service]             # repair ownership and modes
 clixz rm apps/myapp             # archive under .archive/  (--force deletes, TTY only)
+clixz category add media        # system account + directory + config entry
 
 # housekeeping
 clixz meta [service] [--scaffold]
 clixz manifest [--dry-run]
-clixz image add|rm|ls <name>
+clixz image add|rm|ls <name>    # build contexts under /opt/images
+clixz repo add|rm|ls <name>     # git checkouts under /opt/repos (add --url clones)
+clixz category ls
+clixz rules --edit | --edit-ignore
 clixz config [--migrate] [--edit]
+clixz mcp                       # what the MCP gateway can run and read
 clixz upgrade [--plan]          # upgrade clixz itself, world-readable
 ```
 
@@ -112,9 +118,45 @@ rules:
   dir:  { mode: "750" }                        # category/, service/, config/, data/
   file: { mode: "640" }                        # compose.yaml, service.yaml
   env:  { mode: "600", owner: "root:root" }    # .env
+images: { dir: /opt/images }
+repos:  { dir: /opt/repos }
 npm:
   database: /srv/docker/network/npm/data/app/database.sqlite
 ```
+
+Two files are generated next to the config rather than inside a service, because
+they describe the whole tree: `manifest.json` (`clixz manifest`; the container
+that serves it mounts it read-only from there) and `npm-hosts.json`
+(`clixz exposed --snapshot`, see the MCP gateway below).
+
+### Compose rules and accepted exceptions
+
+What `clixz check` says about a compose file is not hard-coded. Two optional
+files sit next to `config.yaml`, and `clixz rules` prints what is in effect:
+
+```yaml
+# /etc/clixz/lint.yaml — the level of each rule, for every service
+rules:
+  image-latest: error        # error | warn | info | off
+  no-healthcheck: off
+mounts:
+  critical: [/var/run/docker.sock, /root]    # replaces the built-in list
+```
+
+```yaml
+# /etc/clixz/ignore.yaml — findings looked at and accepted, per service
+ignore:
+  - service: automation/esphome          # globs work: "apps/*", "*"
+    rules: [privileged, network-host]
+    reason: "flashes boards over USB and discovers them by mDNS"
+```
+
+`clixz rules --edit` and `clixz rules --edit-ignore` create them from a commented
+template. An ignored finding disappears from `clixz check` (still counted, and
+listed with its reason by `--verbose`) and `clixz fix` leaves it alone. Permission
+findings (`missing-dir`, `missing-file`, `owner`, `mode`, `acl`) can be ignored
+the same way; their severity is not configurable. An entry without a `reason` is
+reported and not applied.
 
 `clixz config --migrate` prints a v2 translation of a v1 file. It carries the
 identity forward (root_dir, categories, exclude, manifest, images) and **drops**
@@ -153,6 +195,20 @@ a plan, you run `sudo clixz fix …`.
 sudo cp deploy/clixz-mcpd.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now clixz-mcpd
 ```
+
+The daemon also lists repos and categories, prints the rules, and plans
+`category add`, `repo add` and `repo rm` — planned, like every other mutation.
+
+`clixz exposed` reads a database only root can open, so the daemon cannot run it
+for real. Instead root copies the proxy hosts to `npm-hosts.json` on a timer, and
+an unprivileged `clixz exposed` falls back on that copy and says how old it is:
+
+```bash
+sudo cp deploy/clixz-snapshot.service deploy/clixz-snapshot.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now clixz-snapshot.timer
+```
+
+The same timer refreshes `manifest.json`.
 
 ## Development
 

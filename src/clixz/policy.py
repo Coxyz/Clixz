@@ -37,6 +37,8 @@ class Finding:
     message: str
     # Command that would fix it, or None when nothing can be done automatically.
     fix: list[str] | None = None
+    # The id ignore.yaml refers to: missing-dir, missing-file, owner, mode, acl.
+    rule: str = ""
 
     @property
     def fixable(self) -> bool:
@@ -49,6 +51,9 @@ class ServiceReport:
     service: str
     path: Path
     findings: list[Finding] = field(default_factory=list)
+    # Findings an ignore.yaml entry accepted, with the reason it gave. They
+    # count for nothing: not in `worst`, not in `fixes`.
+    ignored: list[tuple[Finding, str]] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -137,10 +142,11 @@ def _audit_path(
         if is_dir:
             findings.append(Finding(
                 path, Severity.ERROR, "directory is missing",
-                fix=["mkdir", "-p", str(path)],
+                fix=["mkdir", "-p", str(path)], rule="missing-dir",
             ))
         else:
-            findings.append(Finding(path, Severity.WARN, "file is missing"))
+            findings.append(Finding(path, Severity.WARN, "file is missing",
+                                    rule="missing-file"))
         return findings
 
     if state.owner != expected_owner:
@@ -148,32 +154,45 @@ def _audit_path(
             findings.append(Finding(
                 path, Severity.ERROR,
                 f"owner is {state.owner}, expected {expected_owner} "
-                "(which does not resolve on this host)",
+                "(which does not resolve on this host)", rule="owner",
             ))
         else:
             findings.append(Finding(
                 path, Severity.ERROR,
                 f"owner is {state.owner}, expected {expected_owner}",
-                fix=["chown", expected_owner, str(path)],
+                fix=["chown", expected_owner, str(path)], rule="owner",
             ))
 
     if state.mode != rule.mode:
         findings.append(Finding(
             path, Severity.ERROR,
             f"mode is {state.mode}, expected {rule.mode}",
-            fix=["chmod", rule.mode, str(path)],
+            fix=["chmod", rule.mode, str(path)], rule="mode",
         ))
 
     if state.extended_acl:
         findings.append(Finding(
             path, Severity.WARN,
             "carries POSIX ACL entries — v2 uses owner/mode only (leftover from v1)",
-            fix=["setfacl", "-b", str(path)],
+            fix=["setfacl", "-b", str(path)], rule="acl",
         ))
 
     if not findings:
         findings.append(Finding(path, Severity.OK, f"{expected_owner} {rule.mode}"))
     return findings
+
+
+def _apply_ignores(config: Config, report: ServiceReport) -> ServiceReport:
+    """Move the findings ignore.yaml accepts out of the report proper."""
+    kept: list[Finding] = []
+    for finding in report.findings:
+        entry = config.policy.ignored(report.name, finding.rule) if finding.rule else None
+        if entry is None:
+            kept.append(finding)
+        else:
+            report.ignored.append((finding, entry.reason))
+    report.findings = kept
+    return report
 
 
 def audit_service(config: Config, category: str, service: str) -> ServiceReport:
@@ -187,7 +206,7 @@ def audit_service(config: Config, category: str, service: str) -> ServiceReport:
     report.findings += _audit_path(svc_path / COMPOSE, "file", owner, config, is_dir=False)
     report.findings += _audit_path(svc_path / SERVICE_FILE, "file", owner, config, is_dir=False)
     report.findings += _audit_path(svc_path / ENV_FILE, "env", owner, config, is_dir=False)
-    return report
+    return _apply_ignores(config, report)
 
 
 def audit_category_dir(config: Config, category: str) -> ServiceReport:
@@ -197,7 +216,7 @@ def audit_category_dir(config: Config, category: str) -> ServiceReport:
     report.findings += _audit_path(
         path, "dir", config.category(category).owner, config, is_dir=True,
     )
-    return report
+    return _apply_ignores(config, report)
 
 
 def audit_all(config: Config, category: str | None = None) -> list[ServiceReport]:

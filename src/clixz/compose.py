@@ -24,23 +24,9 @@ from typing import Any
 import yaml
 
 from .config import Config
+from .rules import LintRules
 
 DEFAULT_NETWORK = "boxyz_network"
-
-# Host paths that hand over the machine however they are mounted. Read-only
-# changes nothing here: :ro on a socket still lets you talk to the daemon, and
-# read access to /etc/shadow or /root/.ssh is the whole prize.
-ALWAYS_CRITICAL = (
-    "/var/run/docker.sock", "/run/docker.sock", "/var/lib/docker",
-    "/etc/shadow", "/root", "/boot",
-)
-
-# Paths that hand over the machine only when writable. Read-only, they are
-# ordinary configuration a container may legitimately need — the MCP container
-# reads /etc/clixz/config.yaml to answer questions about it, and flagging that
-# as host-root would be a false positive that teaches the reader to ignore the
-# linter.
-CRITICAL_IF_WRITABLE = ("/etc/clixz", "/etc/systemd", "/etc/sudoers", "/etc/sudoers.d")
 
 _PORT_RE = re.compile(
     r"^(?:(?P<ip>[0-9.]+|\[[0-9a-fA-F:]+\]):)?(?P<host>\d+):(?P<container>\d+)(?:/\w+)?$"
@@ -52,6 +38,7 @@ class LintFinding:
     service: str        # the compose service key the finding is about
     level: str          # "error" | "warn" | "info"
     message: str
+    rule: str = ""      # the id lint.yaml and ignore.yaml refer to
 
 
 # ─── template ────────────────────────────────────────────────────────────────
@@ -145,28 +132,38 @@ def _no_new_privileges(body: dict) -> bool:
     )
 
 
-def _lint_image(name: str, body: dict) -> list[LintFinding]:
+class _Findings:
+    """Collects findings for one service at the level lint.yaml gives each rule."""
+
+    def __init__(self, service: str, rules: LintRules) -> None:
+        self.service = service
+        self.rules = rules
+        self.items: list[LintFinding] = []
+
+    def add(self, rule: str, message: str) -> None:
+        level = self.rules.level(rule)
+        if level != "off":
+            self.items.append(LintFinding(self.service, level, message, rule))
+
+
+def _lint_image(out: _Findings, body: dict) -> None:
     image = str(body.get("image", "")).strip()
     if not image:
         if not body.get("build"):
-            return [LintFinding(name, "error", "no image and no build context")]
-        return []
+            out.add("no-image", "no image and no build context")
+        return
     tag = image.rpartition("/")[2]
     if "@sha256:" in image:
-        return []
+        return
     if ":" not in tag:
-        return [LintFinding(name, "warn", f"image {image} has no tag — pin a version")]
-    if tag.endswith(":latest"):
-        return [LintFinding(
-            name, "warn",
-            f"image {image} is pinned to :latest — a redeploy can change the code "
-            "under you without a diff",
-        )]
-    return []
+        out.add("image-untagged", f"image {image} has no tag — pin a version")
+    elif tag.endswith(":latest"):
+        out.add("image-latest",
+                f"image {image} is pinned to :latest — a redeploy can change the code "
+                "under you without a diff")
 
 
-def _lint_volumes(name: str, body: dict, svc_dir: Path | None) -> list[LintFinding]:
-    out: list[LintFinding] = []
+def _lint_volumes(out: _Findings, body: dict, svc_dir: Path | None) -> None:
     for entry in _as_list(body.get("volumes")):
         if isinstance(entry, dict):
             source = str(entry.get("source", ""))
@@ -184,127 +181,108 @@ def _lint_volumes(name: str, body: dict, svc_dir: Path | None) -> list[LintFindi
         def _under(prefixes: tuple[str, ...], resolved: str = resolved) -> bool:
             return any(resolved == p or resolved.startswith(p + "/") for p in prefixes)
 
-        if _under(ALWAYS_CRITICAL):
-            out.append(LintFinding(
-                name, "error",
-                f"mounts {source} — this is equivalent to handing over host root",
-            ))
-        elif _under(CRITICAL_IF_WRITABLE):
+        if _under(out.rules.critical):
+            out.add("mount-critical",
+                    f"mounts {source} — this is equivalent to handing over host root")
+        elif _under(out.rules.critical_if_writable):
             if read_only:
-                out.append(LintFinding(
-                    name, "info", f"mounts {source} read-only",
-                ))
+                out.add("mount-config-ro", f"mounts {source} read-only")
             else:
-                out.append(LintFinding(
-                    name, "error",
-                    f"mounts {source} read-write — the container can rewrite the "
-                    "rules that constrain it",
-                ))
-        else:
-            if resolved == "/":
-                out.append(LintFinding(
-                    name, "error", "mounts / — the container can read every secret",
-                ))
-            elif source.startswith("/") and svc_dir is not None:
-                inside = Path(resolved) == svc_dir or svc_dir in Path(resolved).parents
-                if not inside:
-                    out.append(LintFinding(
-                        name, "warn",
-                        f"mounts the host path {source}"
-                        + ("" if read_only else " read-write"),
-                    ))
-    return out
+                out.add("mount-config-rw",
+                        f"mounts {source} read-write — the container can rewrite the "
+                        "rules that constrain it")
+        elif resolved == "/":
+            out.add("mount-root", "mounts / — the container can read every secret")
+        elif source.startswith("/") and svc_dir is not None:
+            inside = Path(resolved) == svc_dir or svc_dir in Path(resolved).parents
+            if not inside:
+                out.add("mount-host",
+                        f"mounts the host path {source}" + ("" if read_only else " read-write"))
 
 
-def _lint_ports(name: str, body: dict) -> list[LintFinding]:
-    out: list[LintFinding] = []
+def _lint_ports(out: _Findings, body: dict) -> None:
     for entry in _as_list(body.get("ports")):
         if isinstance(entry, dict):
             published, host_ip = str(entry.get("published", "")), str(entry.get("host_ip", ""))
             if published and host_ip in ("", "0.0.0.0", "::"):
-                out.append(LintFinding(
-                    name, "warn",
-                    f"publishes {published} on every interface — prefix 127.0.0.1: "
-                    "unless the LAN genuinely needs it",
-                ))
+                out.add("port-all-interfaces",
+                        f"publishes {published} on every interface — prefix 127.0.0.1: "
+                        "unless the LAN genuinely needs it")
             continue
         match = _PORT_RE.match(str(entry))
         if match and match.group("ip") in (None, "0.0.0.0", "[::]"):
-            out.append(LintFinding(
-                name, "warn",
-                f"publishes {entry} on every interface — prefix 127.0.0.1: unless "
-                "the LAN genuinely needs it",
-            ))
-    return out
+            out.add("port-all-interfaces",
+                    f"publishes {entry} on every interface — prefix 127.0.0.1: unless "
+                    "the LAN genuinely needs it")
 
 
-def lint_service(name: str, body: dict, svc_dir: Path | None = None) -> list[LintFinding]:
+def lint_service(name: str, body: dict, svc_dir: Path | None = None,
+                 rules: LintRules | None = None) -> list[LintFinding]:
     """Lint one compose service body. Never raises; returns findings."""
-    out: list[LintFinding] = []
+    out = _Findings(name, rules or LintRules())
     if not isinstance(body, dict):
-        return [LintFinding(name, "error", "service body is not a mapping")]
+        out.add("compose-invalid", "service body is not a mapping")
+        return out.items
 
     if body.get("privileged"):
-        out.append(LintFinding(
-            name, "error",
-            "privileged: true — a compromise of this container is a compromise "
-            "of the host",
-        ))
+        out.add("privileged",
+                "privileged: true — a compromise of this container is a compromise "
+                "of the host")
     if str(body.get("network_mode", "")).startswith("host"):
-        out.append(LintFinding(
-            name, "error", "network_mode: host — the container shares the host's stack",
-        ))
+        out.add("network-host", "network_mode: host — the container shares the host's stack")
     if body.get("pid") == "host":
-        out.append(LintFinding(name, "error", "pid: host"))
+        out.add("pid-host", "pid: host")
 
-    out += _lint_image(name, body)
-    out += _lint_volumes(name, body, svc_dir)
-    out += _lint_ports(name, body)
+    _lint_image(out, body)
+    _lint_volumes(out, body, svc_dir)
+    _lint_ports(out, body)
 
     if not _caps_dropped(body):
-        out.append(LintFinding(name, "warn", "no cap_drop: [ALL]"))
+        out.add("no-cap-drop", "no cap_drop: [ALL]")
     if not _no_new_privileges(body):
-        out.append(LintFinding(name, "warn", "no security_opt: [no-new-privileges:true]"))
+        out.add("no-new-privileges", "no security_opt: [no-new-privileges:true]")
     if not body.get("user") and not body.get("privileged"):
-        out.append(LintFinding(
-            name, "info", "no user: — the container runs as whatever the image says, "
-            "often root",
-        ))
+        out.add("no-user", "no user: — the container runs as whatever the image says, "
+                "often root")
     if not body.get("restart"):
-        out.append(LintFinding(name, "warn", "no restart policy"))
+        out.add("no-restart", "no restart policy")
 
     logging = body.get("logging")
     options = logging.get("options") if isinstance(logging, dict) else None
     if not isinstance(options, dict) or not options.get("max-size"):
-        out.append(LintFinding(
-            name, "warn", "no logging max-size — this log can fill the disk",
-        ))
+        out.add("no-log-rotation", "no logging max-size — this log can fill the disk")
     if not body.get("healthcheck"):
-        out.append(LintFinding(name, "info", "no healthcheck"))
+        out.add("no-healthcheck", "no healthcheck")
 
     for key in ("cap_add", "devices", "sysctls"):
         if body.get(key):
             values = ", ".join(str(v) for v in _as_list(body[key])[:4])
-            out.append(LintFinding(name, "info", f"{key}: {values}"))
+            out.add("extra-privileges", f"{key}: {values}")
 
-    return out
+    return out.items
 
 
-def lint_compose(path: Path, svc_dir: Path | None = None) -> list[LintFinding]:
+def lint_compose(path: Path, svc_dir: Path | None = None,
+                 rules: LintRules | None = None) -> list[LintFinding]:
     """Lint every service in a compose file."""
+    rules = rules or LintRules()
+    whole = _Findings("", rules)
     doc = load_compose(path)
     if doc is None:
         if not path.is_file() or not path.read_text(encoding="utf-8").strip():
-            return [LintFinding("", "warn", "compose.yaml is empty")]
-        return [LintFinding("", "error", "compose.yaml is not readable YAML")]
+            whole.add("compose-empty", "compose.yaml is empty")
+        else:
+            whole.add("compose-invalid", "compose.yaml is not readable YAML")
+        return whole.items
 
     services = doc.get("services")
     if not isinstance(services, dict) or not services:
-        return [LintFinding("", "error", "compose.yaml declares no services")]
+        whole.add("compose-invalid", "compose.yaml declares no services")
+        return whole.items
 
     out: list[LintFinding] = []
     for name, body in services.items():
-        out += lint_service(str(name), body, svc_dir)
+        out += lint_service(str(name), body, svc_dir, rules)
     return out
 
 

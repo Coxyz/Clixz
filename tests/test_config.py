@@ -53,7 +53,11 @@ class ValidateTests(unittest.TestCase):
         issues = validate_config(_v1())
         self.assertTrue(any(i.startswith("'settings' was retired") for i in issues))
         self.assertTrue(any(i.startswith("'dev' was retired") for i in issues))
-        self.assertTrue(any(i.startswith("'repos' was retired") for i in issues))
+
+    def test_repos_is_back_with_one_key_and_its_v1_keys_stay_retired(self) -> None:
+        self.assertEqual([], validate_config(_v2() | {"repos": {"dir": "/opt/repos"}}))
+        issues = validate_config(_v2() | {"repos": {"dir": "/opt/repos", "mode": "775"}})
+        self.assertTrue(any(i.startswith("repos.mode was retired") for i in issues))
 
     def test_unknown_rule_is_reported(self) -> None:
         cfg = _v2()
@@ -93,8 +97,24 @@ class ParseTests(unittest.TestCase):
         cfg = parse_config(_v2() | {"npm": {"database": "/tmp/db.sqlite"}})
         self.assertEqual("/tmp/db.sqlite", str(cfg.npm.database))
 
-    def test_npm_section_is_optional(self) -> None:
-        self.assertIsNone(parse_config(_v2()).npm.database)
+    def test_without_an_npm_section_the_database_is_looked_for_in_the_tree(self) -> None:
+        # The migrated host config had no `npm` key, and `clixz exposed` then
+        # answered "nothing configured" on a host that runs NPM.
+        self.assertEqual("/srv/docker/network/npm/data/app/database.sqlite",
+                         str(parse_config(_v2()).npm.database))
+
+    def test_npm_can_be_disabled_explicitly(self) -> None:
+        self.assertIsNone(parse_config(_v2() | {"npm": {"database": None}}).npm.database)
+
+    def test_generated_files_default_to_next_to_the_config(self) -> None:
+        cfg = parse_config(_v2())
+        self.assertEqual("/etc/clixz/manifest.json", str(cfg.resolved_manifest_path))
+        self.assertEqual("/etc/clixz/npm-hosts.json", str(cfg.resolved_npm_snapshot))
+
+    def test_repos_dir(self) -> None:
+        self.assertEqual("/opt/repos", str(parse_config(_v2()).repos_dir))
+        cfg = parse_config(_v2() | {"repos": {"dir": "/srv/git"}})
+        self.assertEqual("/srv/git", str(cfg.repos_dir))
 
 
 class MigrateTests(unittest.TestCase):

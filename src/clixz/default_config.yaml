@@ -35,18 +35,31 @@ rules:
     # user must not be able to read the secrets it is handed by the daemon.
     owner: "root:root"
 
-# `clixz manifest` aggregates the public service.yaml descriptors here. The API
-# container mounts it read-only and serves it at /api/services.
-api:
-  manifest: /srv/docker/apps/api/data/manifest.json
+# `clixz manifest` aggregates the public service.yaml descriptors into
+# manifest.json, next to this file. It describes the whole tree, so it does not
+# live inside one service: the container that serves it mounts it from here,
+# read-only. Uncomment to put it somewhere else.
+# api:
+#   manifest: /etc/clixz/manifest.json
 
 # Self-built image build contexts (Dockerfile + sources), one directory each.
 # Scaffolded by `clixz image add`; ownership is not audited.
 images:
   dir: /opt/images
 
+# Git checkouts, one directory each. Created by `clixz repo add`, listed by
+# `clixz repo ls`; ownership is not audited.
+repos:
+  dir: /opt/repos
+
 # `clixz exposed` reads this database to compare what the reverse proxy
 # actually publishes against what the service descriptors declare. Read-only,
-# needs root, and degrades to a warning when it cannot be read.
+# and it needs root. `sudo clixz exposed --snapshot` copies the proxy hosts to
+# npm-hosts.json, next to this file, so that an unprivileged reader (clixz-mcpd)
+# gets the same answer without being given the database.
 npm:
   database: /srv/docker/network/npm/data/app/database.sqlite
+  # snapshot: /etc/clixz/npm-hosts.json
+
+# The compose rules and the accepted exceptions are not in this file: see
+# lint.yaml and ignore.yaml next to it (`clixz rules`).

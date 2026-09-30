@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import unittest
 
-from clixz.mcpd import PLAN_ACTIONS, READ_COMMANDS, RequestError, build_argv, handle
+from clixz.mcpd import (
+    NAMED_PLAN_ACTIONS,
+    PLAN_ACTIONS,
+    READ_COMMANDS,
+    RequestError,
+    access,
+    build_argv,
+    handle,
+)
 
 
 class ReadTests(unittest.TestCase):
@@ -18,6 +26,12 @@ class ReadTests(unittest.TestCase):
     def test_check_accepts_an_optional_service(self) -> None:
         self.assertIn("apps/atuin", build_argv({"cmd": "check", "service": "apps/atuin"}))
         self.assertNotIn("apps/atuin", build_argv({"cmd": "check"}))
+
+    def test_check_verbose_is_a_flag_not_a_value(self) -> None:
+        self.assertIn("--verbose", build_argv({"cmd": "check", "verbose": True}))
+        self.assertNotIn("--verbose", build_argv({"cmd": "check", "verbose": "--config x"}))
+        self.assertNotIn("--verbose", build_argv({"cmd": "show", "service": "apps/x",
+                                                  "verbose": True}))
 
     def test_manifest_is_always_a_dry_run(self) -> None:
         self.assertIn("--dry-run", build_argv({"cmd": "manifest"}))
@@ -42,6 +56,58 @@ class MutationTests(unittest.TestCase):
     def test_unknown_action_is_refused(self) -> None:
         with self.assertRaises(RequestError):
             build_argv({"cmd": "plan", "action": "destroy", "service": "apps/x"})
+
+
+class NamedPlanTests(unittest.TestCase):
+    def test_a_category_is_only_ever_planned(self) -> None:
+        argv = build_argv({"cmd": "plan", "action": "category-add", "name": "media"})
+        self.assertEqual(["category", "add", "media", "--plan", "--json"], argv[1:])
+
+    def test_a_repo_is_only_ever_planned(self) -> None:
+        argv = build_argv({"cmd": "plan", "action": "repo-add", "name": "demo",
+                           "url": "https://github.com/me/demo.git"})
+        self.assertEqual(["repo", "add", "demo", "--url", "https://github.com/me/demo.git",
+                          "--plan", "--json"], argv[1:])
+        argv = build_argv({"cmd": "plan", "action": "repo-rm", "name": "demo"})
+        self.assertEqual(["repo", "rm", "demo", "--plan", "--json"], argv[1:])
+
+    def test_the_group_verbs_are_not_reachable_directly(self) -> None:
+        for cmd in ("category", "repo", "category add", "repo-add", "category-add"):
+            with self.assertRaises(RequestError, msg=cmd):
+                build_argv({"cmd": cmd, "name": "media"})
+
+    def test_listings_take_no_argument(self) -> None:
+        self.assertEqual(["repo", "ls", "--json"],
+                         build_argv({"cmd": "repos", "name": "--help"})[1:])
+        self.assertEqual(["category", "ls", "--json"], build_argv({"cmd": "categories"})[1:])
+
+    def test_names_urls_and_accounts_are_validated(self) -> None:
+        bad = (
+            {"action": "category-add", "name": "../etc"},
+            {"action": "category-add", "name": "--yes"},
+            {"action": "category-add", "name": "media", "account": "root; id"},
+            {"action": "category-add"},
+            {"action": "repo-add", "name": "a/b"},
+            {"action": "repo-add", "name": "demo", "url": "--upload-pack=id"},
+            {"action": "repo-add", "name": "demo", "url": "file:///etc/shadow"},
+            {"action": "repo-add", "name": "demo", "url": 42},
+            {"action": "repo-rm", "name": ".."},
+        )
+        for request in bad:
+            with self.assertRaises(RequestError, msg=request):
+                build_argv({"cmd": "plan", **request})
+
+
+class AccessTests(unittest.TestCase):
+    def test_every_verb_the_daemon_accepts_is_listed(self) -> None:
+        listed = access()
+        self.assertEqual(list(READ_COMMANDS), [r["request"] for r in listed["read"]])
+        self.assertEqual([*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS],
+                         [r["request"] for r in listed["plan"]])
+
+    def test_every_listed_mutation_is_a_plan(self) -> None:
+        for row in access()["plan"]:
+            self.assertIn("--plan", row["runs"], row)
 
 
 class ValidationTests(unittest.TestCase):

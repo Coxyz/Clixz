@@ -18,14 +18,20 @@ secret — which is the whole of what the audit found worth enforcing.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from pathlib import Path
 
 import yaml
 
+from .rules import Policy, load_policy
+
+# Where the config lives when nothing says otherwise, and therefore where the
+# files clixz generates next to it (manifest, NPM snapshot) go by default.
+DEFAULT_CONFIG_DIR = Path("/etc/clixz")
+
 CONFIG_LOCATIONS: tuple[Path, ...] = (
-    Path("/etc/clixz/config.yaml"),
+    DEFAULT_CONFIG_DIR / "config.yaml",
     Path.home() / ".config" / "clixz" / "config.yaml",
 )
 
@@ -64,9 +70,14 @@ class NpmConfig:
     Reading it needs root, and clixz degrades to a warning when it cannot. The
     point is not enforcement — it is that the audit found 24 proxy hosts where
     the service descriptors declared 9, and nothing in the system noticed.
+
+    ``snapshot`` is a copy of the proxy hosts that root writes with
+    ``clixz exposed --snapshot`` and anyone may read. It is how the unprivileged
+    ``clixz-mcpd`` answers ``exposed`` without ever being given the database.
     """
 
     database: Path | None = None
+    snapshot: Path | None = None
 
 
 # Every rule, with its built-in default. A config may override any of them; one
@@ -94,7 +105,12 @@ class Config:
     exclude: list[str] = field(default_factory=list)
     manifest_path: Path | None = None
     images_dir: Path = Path("/opt/images")
+    repos_dir: Path = Path("/opt/repos")
     npm: NpmConfig = field(default_factory=NpmConfig)
+    # The directory config.yaml was read from; None for the bundled default.
+    config_dir: Path | None = None
+    # lint.yaml and ignore.yaml, read from config_dir.
+    policy: Policy = field(default_factory=Policy)
 
     def category(self, name: str) -> CategoryConfig:
         if name not in self.categories:
@@ -109,9 +125,17 @@ class Config:
 
     @property
     def resolved_manifest_path(self) -> Path:
+        # Next to the config, not inside a service: the manifest describes the
+        # whole tree, and whichever container serves it mounts it from here.
         if self.manifest_path is not None:
             return self.manifest_path
-        return self.root_dir / "apps" / "api" / "data" / "manifest.json"
+        return (self.config_dir or DEFAULT_CONFIG_DIR) / "manifest.json"
+
+    @property
+    def resolved_npm_snapshot(self) -> Path:
+        if self.npm.snapshot is not None:
+            return self.npm.snapshot
+        return (self.config_dir or DEFAULT_CONFIG_DIR) / "npm-hosts.json"
 
 
 # ─── loading ─────────────────────────────────────────────────────────────────
@@ -175,20 +199,32 @@ def parse_config(raw: dict) -> Config:
         else Path("/opt/images")
     )
 
+    repos = raw.get("repos")
+    repos_dir = (
+        Path(str(repos["dir"]))
+        if isinstance(repos, dict) and repos.get("dir")
+        else Path("/opt/repos")
+    )
+
+    root_dir = Path(str(raw["root_dir"]))
     npm_raw = raw.get("npm")
-    npm = NpmConfig()
+    # Without an `npm` section the database is looked for where this layout
+    # puts it; `npm: {database: null}` is how a host without NPM says so.
+    npm = NpmConfig(database=root_dir / "network" / "npm" / "data" / "app" / "database.sqlite")
     if isinstance(npm_raw, dict):
         npm = NpmConfig(
             database=Path(str(npm_raw["database"])) if npm_raw.get("database") else None,
+            snapshot=Path(str(npm_raw["snapshot"])) if npm_raw.get("snapshot") else None,
         )
 
     return Config(
-        root_dir=Path(str(raw["root_dir"])),
+        root_dir=root_dir,
         categories=categories,
         rules=rules,
         exclude=[str(p) for p in exclude_raw],
         manifest_path=manifest_path,
         images_dir=images_dir,
+        repos_dir=repos_dir,
         npm=npm,
     )
 
@@ -197,7 +233,10 @@ def load_config(explicit: Path | None = None) -> tuple[Config, Path | None]:
     """Load the config. ``source`` is None when the bundled default is used."""
     source = find_config_path(explicit)
     raw = _load_yaml(source) if source is not None else _bundled_default()
-    return parse_config(raw), source
+    config = parse_config(raw)
+    if source is not None:
+        config = replace(config, config_dir=source.parent, policy=load_policy(source.parent))
+    return config, source
 
 
 def load_raw_config(source: Path | None) -> dict:
@@ -206,7 +245,8 @@ def load_raw_config(source: Path | None) -> dict:
 
 # ─── structural validation (for `clixz check`) ───────────────────────────────
 
-KNOWN_TOP_LEVEL = {"root_dir", "categories", "rules", "exclude", "api", "images", "npm"}
+KNOWN_TOP_LEVEL = {"root_dir", "categories", "rules", "exclude", "api", "images",
+                   "repos", "npm"}
 
 # Sections v1 understood and v2 does not. Naming them explicitly turns "unknown
 # key" — which reads like a typo — into an actionable migration message.
@@ -214,8 +254,11 @@ RETIRED_KEYS = {
     "settings": "ACL principals are gone: v2 uses owner/mode only.",
     "komodo": "ACL principals are gone: Komodo Periphery runs as root already.",
     "dev": "`clixz dev` is gone: code-server is not deployed.",
-    "repos": "/opt/repos is no longer audited: it is a development directory.",
 }
+
+# `repos` came back in 2.2 with a single key. What v1 stored under it (owner,
+# mode, ACL, recursive) is still retired: /opt/repos is not audited.
+RETIRED_REPOS_KEYS = ("owner", "mode", "acl", "recursive")
 
 RETIRED_RULES = {
     "category_dir": "dir", "service_dir": "dir", "config_dir": "dir", "data_dir": "dir",
@@ -269,6 +312,15 @@ def validate_config(raw: dict) -> list[str]:
     npm = raw.get("npm")
     if npm is not None and not isinstance(npm, dict):
         issues.append("'npm' must be a mapping with a 'database' path")
+
+    repos = raw.get("repos")
+    if repos is not None and not isinstance(repos, dict):
+        issues.append("'repos' must be a mapping with a 'dir' path")
+    elif isinstance(repos, dict):
+        for key in RETIRED_REPOS_KEYS:
+            if key in repos:
+                issues.append(f"repos.{key} was retired in v2 — /opt/repos is not audited, "
+                              "only 'dir' is read")
 
     for key in raw:
         if key in RETIRED_KEYS:

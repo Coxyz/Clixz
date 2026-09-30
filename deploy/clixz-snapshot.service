@@ -18,5 +18,5 @@ UMask=0022
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/etc/clixz
+# No ProtectSystem=strict here: SQLite may need to create the -shm file next to
+# a database in WAL mode even to read it, and that database belongs to NPM.

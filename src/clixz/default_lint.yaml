@@ -1,0 +1,62 @@
+# clixz compose rules — /etc/clixz/lint.yaml
+#
+# What `clixz check` says about a compose.yaml, and how loudly. Every rule is
+# listed with its built-in level; change a level, or delete a line to get the
+# default back. `clixz rules` prints what is actually in effect.
+#
+# Levels: error | warn | info | off
+#
+# A compose finding never changes the exit code of `clixz check` whatever its
+# level: it is advice about a file you own. To accept one for a given service
+# instead of changing the rule for everybody, use ignore.yaml.
+
+rules:
+  # The container is, in practice, root on the host.
+  privileged: error
+  network-host: error
+  pid-host: error
+
+  # Host paths. The lists are under `mounts:` below.
+  mount-critical: error        # a path in mounts.critical, however it is mounted
+  mount-root: error            # /
+  mount-config-rw: error       # a path in mounts.critical_if_writable, read-write
+  mount-config-ro: info        # the same path, read-only
+  mount-host: warn             # any other host path outside the service directory
+
+  # Image.
+  no-image: error              # neither image: nor build:
+  image-untagged: warn
+  image-latest: warn           # a redeploy can change the code without a diff
+
+  # Network.
+  port-all-interfaces: warn    # published on 0.0.0.0 instead of 127.0.0.1
+
+  # Hardening the template ships with.
+  no-cap-drop: warn
+  no-new-privileges: warn
+  no-restart: warn
+  no-log-rotation: warn
+  no-user: info
+  no-healthcheck: info
+  extra-privileges: info       # cap_add, devices or sysctls in use
+
+  # The file itself.
+  compose-empty: warn
+  compose-invalid: error
+
+# Setting a list here REPLACES the built-in one, it does not add to it.
+mounts:
+  # Handing one of these over is handing over the host, read-only or not.
+  critical:
+    - /var/run/docker.sock
+    - /run/docker.sock
+    - /var/lib/docker
+    - /etc/shadow
+    - /root
+    - /boot
+  # Dangerous only when writable: the container could rewrite its own rules.
+  critical_if_writable:
+    - /etc/clixz
+    - /etc/systemd
+    - /etc/sudoers
+    - /etc/sudoers.d

@@ -1,0 +1,22 @@
+[Unit]
+Description=clixz: copy the reverse proxy hosts where clixz-mcpd can read them
+After=docker.service
+
+[Service]
+Type=oneshot
+# Root, because the NPM database is root:root and listing containers needs the
+# Docker socket. This is the privileged half of `clixz exposed`; it takes no
+# input from anyone and writes one file. clixz-mcpd stays unprivileged and only
+# ever reads the result.
+ExecStart=/usr/local/bin/clixz exposed --snapshot
+# The manifest is refreshed on the same schedule: both are files generated next
+# to the config for a reader that cannot generate them itself. The leading "-"
+# keeps an invalid service.yaml from marking the snapshot as failed.
+ExecStart=-/usr/local/bin/clixz manifest
+UMask=0022
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/clixz

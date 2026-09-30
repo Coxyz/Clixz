@@ -44,6 +44,46 @@ class MutationTests(unittest.TestCase):
             build_argv({"cmd": "plan", "action": "destroy", "service": "apps/x"})
 
 
+class NamedPlanTests(unittest.TestCase):
+    def test_a_category_is_only_ever_planned(self) -> None:
+        argv = build_argv({"cmd": "plan", "action": "category-add", "name": "media"})
+        self.assertEqual(["category", "add", "media", "--plan", "--json"], argv[1:])
+
+    def test_a_repo_is_only_ever_planned(self) -> None:
+        argv = build_argv({"cmd": "plan", "action": "repo-add", "name": "demo",
+                           "url": "https://github.com/me/demo.git"})
+        self.assertEqual(["repo", "add", "demo", "--url", "https://github.com/me/demo.git",
+                          "--plan", "--json"], argv[1:])
+        argv = build_argv({"cmd": "plan", "action": "repo-rm", "name": "demo"})
+        self.assertEqual(["repo", "rm", "demo", "--plan", "--json"], argv[1:])
+
+    def test_the_group_verbs_are_not_reachable_directly(self) -> None:
+        for cmd in ("category", "repo", "category add", "repo-add", "category-add"):
+            with self.assertRaises(RequestError, msg=cmd):
+                build_argv({"cmd": cmd, "name": "media"})
+
+    def test_listings_take_no_argument(self) -> None:
+        self.assertEqual(["repo", "ls", "--json"],
+                         build_argv({"cmd": "repos", "name": "--help"})[1:])
+        self.assertEqual(["category", "ls", "--json"], build_argv({"cmd": "categories"})[1:])
+
+    def test_names_urls_and_accounts_are_validated(self) -> None:
+        bad = (
+            {"action": "category-add", "name": "../etc"},
+            {"action": "category-add", "name": "--yes"},
+            {"action": "category-add", "name": "media", "account": "root; id"},
+            {"action": "category-add"},
+            {"action": "repo-add", "name": "a/b"},
+            {"action": "repo-add", "name": "demo", "url": "--upload-pack=id"},
+            {"action": "repo-add", "name": "demo", "url": "file:///etc/shadow"},
+            {"action": "repo-add", "name": "demo", "url": 42},
+            {"action": "repo-rm", "name": ".."},
+        )
+        for request in bad:
+            with self.assertRaises(RequestError, msg=request):
+                build_argv({"cmd": "plan", **request})
+
+
 class ValidationTests(unittest.TestCase):
     def test_shell_metacharacters_are_refused(self) -> None:
         for bad in ("a; rm -rf /", "a b", "../etc", "a|b", "-rf", ""):

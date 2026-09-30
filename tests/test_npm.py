@@ -8,7 +8,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from clixz.npm import NpmUnavailable, ProxyHost, cross_check, read_proxy_hosts
+from clixz.npm import (
+    NpmUnavailable,
+    ProxyHost,
+    cross_check,
+    read_proxy_hosts,
+    read_snapshot,
+    snapshot_json,
+)
 
 _ROWS = [
     (["vault.coxyz.fr"], 1, 0, "bitwarden", 80),
@@ -92,3 +99,35 @@ class CrossCheckTests(unittest.TestCase):
     def test_docker_absent_skips_the_dead_target_check(self) -> None:
         report = cross_check(self.hosts, self.declared, None)
         self.assertEqual([], [m for _, m in report.findings if "no such container" in m])
+
+
+class SnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "npm-hosts.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_snapshot_gives_back_what_was_read(self) -> None:
+        hosts = [ProxyHost(["vault.coxyz.fr"], True, 0, "bitwarden", 80),
+                 ProxyHost(["code.coxyz.fr"], False, 3, "code-server", 8443)]
+        self.path.write_text(snapshot_json(hosts, {"bitwarden"}), encoding="utf-8")
+        read, containers, taken_at = read_snapshot(self.path)
+        self.assertEqual(hosts, read)
+        self.assertEqual({"bitwarden"}, containers)
+        self.assertTrue(taken_at)
+
+    def test_unknown_containers_stay_unknown(self) -> None:
+        # None means docker could not be asked; an empty set would wrongly
+        # declare every proxy target dead.
+        self.path.write_text(snapshot_json([], None), encoding="utf-8")
+        self.assertIsNone(read_snapshot(self.path)[1])
+
+    def test_a_missing_or_broken_snapshot_is_unavailable_not_a_crash(self) -> None:
+        with self.assertRaises(NpmUnavailable):
+            read_snapshot(self.path)
+        self.path.write_text('{"hosts": [{"domains": 3}]}', encoding="utf-8")
+        with self.assertRaises(NpmUnavailable):
+            read_snapshot(self.path)
+

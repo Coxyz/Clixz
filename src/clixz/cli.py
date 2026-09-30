@@ -1,8 +1,8 @@
 """clixz command line.
 
-Twelve verbs, in three groups: read (``ls``, ``show``, ``check``, ``exposed``),
-write (``new``, ``fix``, ``rm``), and housekeeping (``meta``, ``manifest``,
-``image``, ``config``, ``upgrade``).
+Verbs in three groups: read (``ls``, ``show``, ``check``, ``exposed``,
+``rules``), write (``new``, ``fix``, ``rm``, ``category add``), and housekeeping
+(``meta``, ``manifest``, ``image``, ``repo``, ``config``, ``upgrade``).
 
 Every write verb accepts ``--plan``: it prints the commands it would run, as
 JSON when asked, and writes nothing. That flag is what lets ``clixz-mcpd``
@@ -28,7 +28,10 @@ from rich.table import Table
 from . import __version__
 from . import compose as compose_mod
 from . import npm as npm_mod
+from . import repo as repo_mod
+from . import rules as rules_mod
 from .archive import archive_service, list_archived
+from .category import add_category, plan_add
 from .config import (
     Config,
     env,
@@ -70,6 +73,10 @@ app = typer.Typer(
 )
 image_app = typer.Typer(help="Self-built image build contexts under /opt/images.")
 app.add_typer(image_app, name="image")
+repo_app = typer.Typer(help="Git checkouts under /opt/repos.")
+app.add_typer(repo_app, name="repo")
+category_app = typer.Typer(help="Categories: a system account, a directory, a config entry.")
+app.add_typer(category_app, name="category")
 
 console = Console()
 err = Console(stderr=True)
@@ -120,6 +127,24 @@ def ensure_root() -> None:
     except OSError as exc:  # pragma: no cover
         err.print(f"[red]ERROR[/red] sudo failed: {exc}")
         raise typer.Exit(code=2)
+
+
+def _lint(name: str, path: Path) -> tuple[list, list]:
+    """Lint one service's compose: ``(findings, [(finding, reason), …] ignored)``."""
+    policy = ctx.config.policy
+    kept, ignored = [], []
+    for finding in compose_mod.lint_compose(path / COMPOSE, path, policy.lint):
+        entry = policy.ignored(name, finding.rule)
+        if entry is None:
+            kept.append(finding)
+        else:
+            ignored.append((finding, entry.reason))
+    return kept, ignored
+
+
+def _lint_json(finding) -> dict[str, str]:
+    return {"service": finding.service, "level": finding.level,
+            "rule": finding.rule, "message": finding.message}
 
 
 def _resolve(name: str) -> tuple[str, str, Path]:
@@ -222,19 +247,19 @@ def show_cmd(
     category, name, path = _resolve(service)
     image, ports, containers = compose_mod.summarize(path / COMPOSE)
     report = audit_service(ctx.config, category, name)
-    lint = compose_mod.lint_compose(path / COMPOSE, path)
+    lint, lint_ignored = _lint(report.name, path)
 
     payload = {
         "category": category, "service": name, "path": str(path),
         "image": image, "ports": ports, "containers": containers,
         "owner": ctx.config.category(category).owner,
         "permissions": [
-            {"path": str(f.path), "severity": f.severity.value, "message": f.message}
+            {"path": str(f.path), "severity": f.severity.value, "rule": f.rule,
+             "message": f.message}
             for f in report.findings
         ],
-        "lint": [
-            {"service": f.service, "level": f.level, "message": f.message} for f in lint
-        ],
+        "lint": [_lint_json(f) for f in lint],
+        "ignored": _ignored_json(report, lint_ignored),
     }
     if json_out:
         return emit(payload)
@@ -256,8 +281,26 @@ def show_cmd(
         style = _LINT_STYLE[finding.level]
         prefix = f"{finding.service}: " if finding.service else ""
         console.print(
-            f"  [{style}]{finding.level:5}[/{style}] {escape(prefix + finding.message)}"
+            f"  [{style}]{finding.level:5}[/{style}] {escape(prefix + finding.message)} "
+            f"[dim]({finding.rule})[/dim]"
         )
+    _print_ignored(report, lint_ignored)
+
+
+def _ignored_json(report, lint_ignored: list) -> list[dict[str, str]]:
+    return [
+        {"rule": f.rule, "message": f.message, "path": str(f.path), "reason": reason}
+        for f, reason in report.ignored
+    ] + [
+        {"rule": f.rule, "message": f.message, "service": f.service, "reason": reason}
+        for f, reason in lint_ignored
+    ]
+
+
+def _print_ignored(report, lint_ignored: list) -> None:
+    for finding, reason in [*report.ignored, *lint_ignored]:
+        console.print(f"  [dim]ignored {escape(finding.message)} ({finding.rule}) — "
+                      f"{escape(reason)}[/dim]")
 
 
 def _print_finding(finding: Finding, indent: str = "  ") -> None:
@@ -290,6 +333,7 @@ def check_cmd(
             raw_issues = validate_config(load_raw_config(ctx.source))
         except (ValueError, OSError) as exc:
             raw_issues = [str(exc)]
+    raw_issues += ctx.config.policy.issues
 
     if service:
         cat, name, _ = _resolve(service)
@@ -298,14 +342,17 @@ def check_cmd(
         reports = audit_all(ctx.config, category)
 
     lint: dict[str, list] = {}
+    lint_ignored: dict[str, list] = {}
     for report in reports:
         if report.service:
-            lint[report.name] = compose_mod.lint_compose(report.path / COMPOSE, report.path)
+            lint[report.name], lint_ignored[report.name] = _lint(report.name, report.path)
 
     stray = unknown_category_dirs(ctx.config) if not service else []
     errors = sum(1 for r in reports for f in r.findings if f.severity is Severity.ERROR)
     warns = sum(1 for r in reports for f in r.findings if f.severity is Severity.WARN)
     lint_errors = sum(1 for fs in lint.values() for f in fs if f.level == "error")
+    ignored = (sum(len(r.ignored) for r in reports)
+               + sum(len(fs) for fs in lint_ignored.values()))
 
     if json_out:
         emit({
@@ -316,18 +363,17 @@ def check_cmd(
                     "severity": r.worst.value,
                     "findings": [
                         {"path": str(f.path), "severity": f.severity.value,
-                         "message": f.message, "fix": f.fix}
+                         "rule": f.rule, "message": f.message, "fix": f.fix}
                         for f in r.findings if verbose or f.severity is not Severity.OK
                     ],
-                    "lint": [
-                        {"service": f.service, "level": f.level, "message": f.message}
-                        for f in lint.get(r.name, [])
-                    ],
+                    "lint": [_lint_json(f) for f in lint.get(r.name, [])],
+                    "ignored": _ignored_json(r, lint_ignored.get(r.name, [])),
                 }
                 for r in reports
             ],
             "unknown_directories": [str(p) for p in stray],
-            "summary": {"errors": errors, "warnings": warns, "lint_errors": lint_errors},
+            "summary": {"errors": errors, "warnings": warns, "lint_errors": lint_errors,
+                        "ignored": ignored},
         })
         raise typer.Exit(code=1 if (errors or raw_issues) else 0)
 
@@ -340,10 +386,11 @@ def check_cmd(
     for report in reports:
         shown = [f for f in report.findings if verbose or f.severity is not Severity.OK]
         service_lint = lint.get(report.name, [])
-        if not shown and not service_lint:
+        service_ignored = lint_ignored.get(report.name, [])
+        has_ignored = verbose and (report.ignored or service_ignored)
+        if not shown and not service_lint and not has_ignored:
             continue
-        label = report.name or f"{report.category}/"
-        console.print(f"[bold]{label}[/bold]")
+        console.print(f"[bold]{report.name}[/bold]")
         for finding in shown:
             _print_finding(finding)
         for finding in service_lint:
@@ -351,53 +398,92 @@ def check_cmd(
             prefix = f"{finding.service}: " if finding.service else ""
             console.print(
                 f"  [{style}]{finding.level:5}[/{style}] {COMPOSE} — "
-                f"{escape(prefix + finding.message)}"
+                f"{escape(prefix + finding.message)} [dim]({finding.rule})[/dim]"
             )
+        if verbose:
+            _print_ignored(report, service_ignored)
 
     for path in stray:
         console.print(f"[yellow]![/yellow] {path} is not a declared category")
 
     console.print(
         f"\n[dim]{len(reports)} target(s) — "
-        f"{errors} error(s), {warns} warning(s), {lint_errors} compose error(s).[/dim]"
+        f"{errors} error(s), {warns} warning(s), {lint_errors} compose error(s)"
+        + (f", {ignored} ignored" + ("" if verbose else " (--verbose to list them)")
+           if ignored else "")
+        + ".[/dim]"
     )
-    if errors or raw_issues:
+    if errors:
         console.print("[dim]Run `clixz fix` to repair the permission findings.[/dim]")
+    if raw_issues:
+        console.print("[dim]The config problems listed at the top are not fixed by "
+                      "`clixz fix`: edit the file they name.[/dim]")
     raise typer.Exit(code=1 if (errors or raw_issues) else 0)
 
 
 @app.command("exposed")
 def exposed_cmd(
+    snapshot: Annotated[bool, typer.Option(
+        "--snapshot", help="As root: copy the proxy hosts to a file anyone may read.")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Compare what the reverse proxy publishes against what the tree declares.
 
-    Reading the NPM database needs root. Without it the command reports what it
-    could not read rather than pretending everything is fine.
+    Reading the NPM database needs root. Without it the command falls back on
+    the snapshot root last wrote with --snapshot, and says how old it is; with
+    neither, it reports what it could not read rather than pretending all is
+    well.
     """
     database = ctx.config.npm.database
     if database is None:
-        message = "no npm.database configured — nothing to cross-check"
+        message = "npm.database is disabled in the config — nothing to cross-check"
         if json_out:
             return emit({"available": False, "reason": message})
         console.print(f"[yellow]![/yellow] {message}")
         return
 
+    snapshot_path = ctx.config.resolved_npm_snapshot
+    if snapshot:
+        ensure_root()
+        try:
+            hosts = npm_mod.read_proxy_hosts(database)
+        except npm_mod.NpmUnavailable as exc:
+            err.print(f"[red]ERROR[/red] {exc}")
+            raise typer.Exit(code=1)
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text(
+            npm_mod.snapshot_json(hosts, npm_mod.running_containers()), encoding="utf-8")
+        # Explicit, because root's umask on a hardened host would leave it 640
+        # and the whole point is that the unprivileged daemon can read it.
+        snapshot_path.chmod(0o644)
+        if json_out:
+            return emit({"ok": True, "snapshot": str(snapshot_path), "hosts": len(hosts)})
+        console.print(f"[green]✓[/green] Wrote {snapshot_path} ({len(hosts)} proxy host(s)).")
+        return
+
+    source, taken_at = "database", None
     try:
         hosts = npm_mod.read_proxy_hosts(database)
+        containers = npm_mod.running_containers()
     except npm_mod.NpmUnavailable as exc:
-        if json_out:
-            return emit({"available": False, "reason": str(exc)})
-        err.print(f"[yellow]![/yellow] {exc}")
-        raise typer.Exit(code=0)
+        try:
+            hosts, containers, taken_at = npm_mod.read_snapshot(snapshot_path)
+            source = "snapshot"
+        except npm_mod.NpmUnavailable as snapshot_exc:
+            reason = (f"{exc} {snapshot_exc}. "
+                      "Run `sudo clixz exposed --snapshot` to write one.")
+            if json_out:
+                return emit({"available": False, "reason": reason})
+            err.print(f"[yellow]![/yellow] {reason}")
+            raise typer.Exit(code=0)
 
-    report = npm_mod.cross_check(
-        hosts, declared_urls(ctx.config), npm_mod.running_containers(),
-    )
+    report = npm_mod.cross_check(hosts, declared_urls(ctx.config), containers)
 
     if json_out:
         return emit({
             "available": True,
+            "source": source,
+            "snapshot_at": taken_at,
             "hosts": [
                 {"domains": h.domains, "enabled": h.enabled,
                  "access_list_id": h.access_list_id, "target": h.target}
@@ -425,8 +511,92 @@ def exposed_cmd(
             console.print(f"[{style}]{level:5}[/{style}] {escape(message)}")
     console.print(
         f"\n[dim]{len(report.hosts)} proxy host(s), "
-        f"{len(report.enabled_hosts)} enabled.[/dim]"
+        f"{len(report.enabled_hosts)} enabled"
+        + (f" — from the snapshot of {taken_at}" if source == "snapshot" else "")
+        + ".[/dim]"
     )
+
+
+@app.command("rules")
+def rules_cmd(
+    edit: Annotated[bool, typer.Option(
+        "--edit", help="Open lint.yaml in $EDITOR (created from the defaults).")] = False,
+    edit_ignore: Annotated[bool, typer.Option(
+        "--edit-ignore", help="Open ignore.yaml in $EDITOR (created from a template).")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """The compose rules in effect, and the findings ignore.yaml accepts."""
+    directory = ctx.config.config_dir
+    if edit or edit_ignore:
+        if directory is None:
+            err.print("[red]ERROR[/red] No config file in use — the rule files live next "
+                      "to it. Create one with `clixz config --edit` first.")
+            raise typer.Exit(code=2)
+        ensure_root()
+        name = rules_mod.IGNORE_FILE if edit_ignore else rules_mod.LINT_FILE
+        target = directory / name
+        if not target.exists():
+            target.write_text(rules_mod.template(name), encoding="utf-8")
+            target.chmod(0o644)
+        subprocess.run([os.environ.get("EDITOR", "nano"), str(target)], check=False)
+        return
+
+    policy = ctx.config.policy
+    defaults = {r.id: r for r in rules_mod.LINT_RULES}
+    payload = {
+        "lint_file": str(policy.lint_source) if policy.lint_source else None,
+        "ignore_file": str(policy.ignore_source) if policy.ignore_source else None,
+        "rules": [
+            {"id": rule, "level": policy.lint.level(rule), "default": spec.level,
+             "summary": spec.summary}
+            for rule, spec in defaults.items()
+        ],
+        "ignorable_only": [{"id": r.id, "summary": r.summary} for r in rules_mod.AUDIT_RULES],
+        "mounts": {"critical": list(policy.lint.critical),
+                   "critical_if_writable": list(policy.lint.critical_if_writable)},
+        "ignore": [{"service": i.service, "rules": list(i.rules), "reason": i.reason}
+                   for i in policy.ignores],
+        "issues": list(policy.issues),
+    }
+    if json_out:
+        return emit(payload)
+
+    table = Table(box=None, pad_edge=False, title="Compose rules", title_justify="left")
+    for column in ("RULE", "LEVEL", "WHAT IT FLAGS"):
+        table.add_column(column)
+    for row in payload["rules"]:
+        level = row["level"]
+        shown = f"[{_LINT_STYLE.get(level, 'dim')}]{level}[/]"
+        if level != row["default"]:
+            shown += f" [dim](default {row['default']})[/dim]"
+        table.add_row(row["id"], shown, escape(row["summary"]))
+    console.print(table)
+
+    table = Table(box=None, pad_edge=False, title="Permission findings (ignorable only)",
+                  title_justify="left")
+    for column in ("RULE", "WHAT IT FLAGS"):
+        table.add_column(column)
+    for row in payload["ignorable_only"]:
+        table.add_row(row["id"], escape(row["summary"]))
+    console.print()
+    console.print(table)
+
+    console.print()
+    console.print("[bold]Ignored[/bold]")
+    if not policy.ignores:
+        console.print("  [dim]nothing[/dim]")
+    for entry in policy.ignores:
+        console.print(f"  {escape(entry.service)}  {', '.join(entry.rules)}  "
+                      f"[dim]— {escape(entry.reason)}[/dim]")
+
+    console.print()
+    fallback = "[dim]built-in defaults[/dim]"
+    console.print(f"[bold]Rules[/bold]    {policy.lint_source or fallback}")
+    console.print(f"[bold]Ignores[/bold]  {policy.ignore_source or '[dim]none[/dim]'}")
+    for issue in policy.issues:
+        console.print(f"[red]✗[/red] {escape(issue)}")
+    console.print("[dim]`clixz rules --edit` changes a level; "
+                  "`clixz rules --edit-ignore` accepts a finding.[/dim]")
 
 
 # ─── write ───────────────────────────────────────────────────────────────────
@@ -714,6 +884,158 @@ def image_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> N
     console.print(table)
 
 
+@repo_app.command("add")
+def repo_add_cmd(
+    name: str,
+    url: Annotated[Optional[str], typer.Option(
+        "--url", help="Clone this remote instead of creating an empty repository.")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Create /opt/repos/<name>: an empty git repository, or a clone of --url."""
+    try:
+        commands = repo_mod.plan_add(ctx.config.repos_dir, name, url)
+    except ValueError as exc:
+        if json_out:
+            emit({"ok": False, "error": str(exc)})
+            raise typer.Exit(code=2)
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=2)
+    if plan:
+        return _render_plan(commands, json_out=json_out, action="repo add", target=name)
+    for command in commands:
+        done = subprocess.run(command, check=False)
+        if done.returncode != 0:
+            err.print(f"[red]ERROR[/red] {' '.join(command)} exited {done.returncode}.")
+            raise typer.Exit(code=1)
+    if json_out:
+        return emit({"ok": True, "created": str(ctx.config.repos_dir / name)})
+    console.print(f"[green]✓[/green] Created {ctx.config.repos_dir / name}")
+
+
+@repo_app.command("rm")
+def repo_rm_cmd(
+    name: str,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Delete a checkout. Whatever was not pushed is gone with it."""
+    try:
+        repo_mod.validate_repo_name(name)
+    except ValueError as exc:
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=2)
+    target = ctx.config.repos_dir / name
+    if not target.is_dir():
+        if json_out:
+            emit({"ok": False, "error": f"No such repo: {target}"})
+            raise typer.Exit(code=2)
+        err.print(f"[red]ERROR[/red] No such repo: {target}")
+        raise typer.Exit(code=2)
+    if plan:
+        return _render_plan([["rm", "-rf", str(target)]], json_out=json_out,
+                            action="repo rm", target=name)
+    if json_out:
+        # Same reasoning as `rm --force`: a deletion is never reachable from the
+        # machine-readable surface, only planned there.
+        err.print("[red]ERROR[/red] `repo rm` is interactive only; use --plan with --json.")
+        raise typer.Exit(code=2)
+    if not yes and not typer.confirm(
+            f"Delete {target}? Commits that were not pushed are lost."):
+        raise typer.Exit(code=1)
+    shutil.rmtree(target)
+    console.print(f"[green]✓[/green] Deleted {target}")
+
+
+@repo_app.command("ls")
+def repo_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """List the checkouts with their branch and remote."""
+    base = ctx.config.repos_dir
+    rows = repo_mod.list_repos(base)
+    if json_out:
+        return emit({"repos": rows, "dir": str(base)})
+    if not rows:
+        console.print(f"[dim]No repos under {base}.[/dim]")
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("NAME", "BRANCH", "REMOTE"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        if not row["git"]:
+            table.add_row(row["name"], "[dim]not a git repository[/dim]", "")
+            continue
+        table.add_row(row["name"], row.get("branch") or "[dim]—[/dim]",
+                      row.get("remote") or "[dim]no origin[/dim]")
+    console.print(table)
+
+
+@category_app.command("add")
+def category_add_cmd(
+    name: str,
+    account: Annotated[Optional[str], typer.Option(
+        "--account", help="System user and group to own it (default: svc_<name>).")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Create a category: its system account, its directory, its config entry."""
+    try:
+        planned = plan_add(ctx.config, ctx.source, name, account)
+    except (ValueError, OSError) as exc:
+        if json_out:
+            emit({"ok": False, "error": str(exc)})
+            raise typer.Exit(code=2)
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=2)
+
+    if plan:
+        if json_out:
+            return emit({"plan": True, "action": "category add", "target": name,
+                         "commands": planned.commands, "next_steps": planned.notes})
+        _render_plan(planned.commands, json_out=False, action="category add", target=name)
+        for note in planned.notes:
+            console.print(f"[dim]then: {escape(note)}[/dim]")
+        return
+
+    ensure_root()
+    if not yes and not json_out:
+        _render_plan(planned.commands, json_out=False, action="category add", target=name)
+        if not typer.confirm("Create it?"):
+            raise typer.Exit(code=1)
+    try:
+        done = add_category(ctx.config, ctx.source, name, account)
+    except (CommandExecutionError, ValueError, OSError) as exc:
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=1)
+    if json_out:
+        return emit({"ok": True, "created": name, "commands": done.commands,
+                     "next_steps": done.notes})
+    console.print(f"[green]✓[/green] Created category {name}.")
+    for note in done.notes:
+        console.print(f"  [yellow]![/yellow] {escape(note)}")
+
+
+@category_app.command("ls")
+def category_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """List the categories with their account and how many services they hold."""
+    rows = [
+        {"name": name, "owner": cat.owner,
+         "exists": (ctx.config.root_dir / name).is_dir(),
+         "services": len(list_services(ctx.config, name))}
+        for name, cat in sorted(ctx.config.categories.items())
+    ]
+    if json_out:
+        return emit({"categories": rows})
+    table = Table(box=None, pad_edge=False)
+    for column in ("CATEGORY", "OWNER", "SERVICES"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(row["name"], row["owner"],
+                      str(row["services"]) if row["exists"] else "[red]no directory[/red]")
+    console.print(table)
+
+
 @app.command("config")
 def config_cmd(
     edit: Annotated[bool, typer.Option("--edit", help="Open the config in $EDITOR.")] = False,
@@ -757,6 +1079,9 @@ def config_cmd(
         "exclude": config.exclude,
         "manifest": str(config.resolved_manifest_path),
         "images_dir": str(config.images_dir),
+        "repos_dir": str(config.repos_dir),
+        "lint_file": str(config.policy.lint_source) if config.policy.lint_source else None,
+        "ignore_file": str(config.policy.ignore_source) if config.policy.ignore_source else None,
         "npm_database": str(config.npm.database) if config.npm.database else None,
         "issues": issues,
     }
@@ -767,6 +1092,9 @@ def config_cmd(
     console.print(f"[bold]Root[/bold]       {payload['root_dir']}")
     console.print(f"[bold]Manifest[/bold]   {payload['manifest']}")
     console.print(f"[bold]Images[/bold]     {payload['images_dir']}")
+    console.print(f"[bold]Repos[/bold]      {payload['repos_dir']}")
+    console.print(f"[bold]Rules[/bold]      {payload['lint_file'] or 'built-in defaults'}")
+    console.print(f"[bold]Ignores[/bold]    {payload['ignore_file'] or '—'}")
     console.print(f"[bold]NPM db[/bold]     {payload['npm_database'] or '—'}")
 
     table = Table(box=None, pad_edge=False, title="Categories", title_justify="left")

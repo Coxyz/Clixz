@@ -1,0 +1,24 @@
+# clixz accepted exceptions — /etc/clixz/ignore.yaml
+#
+# Findings you have looked at and decided to live with. An ignored finding is
+# left out of `clixz check` (it is still counted, and `clixz check --verbose`
+# shows it with its reason) and `clixz fix` leaves it alone.
+#
+# Each entry needs:
+#   service   category/service. Globs work: "apps/*", "*".
+#   rules     rule ids, as printed by `clixz rules`. Compose rules
+#             (privileged, image-latest, ...) and permission findings
+#             (missing-dir, missing-file, owner, mode, acl).
+#   reason    why. An entry without a reason is reported and not applied:
+#             an exception nobody can justify is one nobody will dare remove.
+#
+# To change a rule for every service, edit lint.yaml instead.
+
+ignore: []
+#  - service: automation/esphome
+#    rules: [privileged, network-host]
+#    reason: "flashes boards over USB and discovers them by mDNS"
+#
+#  - service: "*"
+#    rules: [no-healthcheck]
+#    reason: "healthchecks are added case by case"

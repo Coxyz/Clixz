@@ -20,6 +20,8 @@ Protocol — one JSON object per connection, newline-terminated::
 
     {"cmd": "check", "service": "bitwarden"}
     {"cmd": "plan", "action": "fix", "service": "apps/atuin"}
+    {"cmd": "plan", "action": "category-add", "name": "media"}
+    {"cmd": "plan", "action": "repo-add", "name": "myrepo", "url": "https://…"}
 """
 
 from __future__ import annotations
@@ -31,7 +33,9 @@ import socketserver
 import subprocess
 import sys
 
+from .category import ACCOUNT_NAME_RE, CATEGORY_NAME_RE
 from .config import env
+from .repo import REPO_NAME_RE, REPO_URL_RE
 
 CLIXZ_BIN = env("BIN", "/usr/local/bin/clixz")
 SOCKET_PATH = env("MCPD_SOCKET", "/run/clixz-mcpd/clixz-mcpd.sock")
@@ -43,10 +47,19 @@ _SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?$")
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 # Read-only verbs, run as-is.
-READ_COMMANDS = ("ls", "show", "check", "manifest", "exposed", "config")
-# Mutating verbs. Never run as themselves — always with --plan, which prints
-# what would happen and writes nothing.
+READ_COMMANDS = ("ls", "show", "check", "manifest", "exposed", "config", "rules",
+                 "repos", "categories")
+# Mutating verbs on a service. Never run as themselves — always with --plan,
+# which prints what would happen and writes nothing.
 PLAN_ACTIONS = ("new", "fix", "rm")
+# Mutating verbs on something else than a service, planned the same way.
+NAMED_PLAN_ACTIONS = {
+    "category-add": ["category", "add"],
+    "repo-add": ["repo", "add"],
+    "repo-rm": ["repo", "rm"],
+}
+# Read verbs that are a subcommand of a group.
+_GROUP_READS = {"repos": ["repo", "ls"], "categories": ["category", "ls"]}
 
 
 class RequestError(ValueError):
@@ -65,6 +78,33 @@ def _service(value: object, *, required: bool = True) -> str | None:
     return value
 
 
+def _checked(req: dict, key: str, pattern: re.Pattern[str], *, required: bool) -> str | None:
+    value = req.get(key)
+    if value is None:
+        if required:
+            raise RequestError(f"a '{key}' is required")
+        return None
+    if not isinstance(value, str) or not pattern.match(value):
+        raise RequestError(f"invalid {key}: {value!r}")
+    return value
+
+
+def _named_plan(action: str, req: dict) -> list[str]:
+    argv = [CLIXZ_BIN, *NAMED_PLAN_ACTIONS[action]]
+    if action == "category-add":
+        argv.append(_checked(req, "name", CATEGORY_NAME_RE, required=True))
+        account = _checked(req, "account", ACCOUNT_NAME_RE, required=False)
+        if account:
+            argv += ["--account", account]
+    else:
+        argv.append(_checked(req, "name", REPO_NAME_RE, required=True))
+        if action == "repo-add":
+            url = _checked(req, "url", REPO_URL_RE, required=False)
+            if url:
+                argv += ["--url", url]
+    return [*argv, "--plan", "--json"]
+
+
 def build_argv(req: dict) -> list[str]:
     """Translate a validated request into argv, or raise :class:`RequestError`.
 
@@ -72,6 +112,9 @@ def build_argv(req: dict) -> list[str]:
     variable argument is regex-checked, and nothing reaches a shell.
     """
     cmd = req.get("cmd")
+
+    if cmd in _GROUP_READS:
+        return [CLIXZ_BIN, *_GROUP_READS[cmd], "--json"]
 
     if cmd in READ_COMMANDS:
         argv = [CLIXZ_BIN, str(cmd), "--json"]
@@ -91,9 +134,12 @@ def build_argv(req: dict) -> list[str]:
 
     if cmd == "plan":
         action = req.get("action")
+        if action in NAMED_PLAN_ACTIONS:
+            return _named_plan(action, req)
         if action not in PLAN_ACTIONS:
             raise RequestError(
-                f"unknown action: {action!r} (known: {', '.join(PLAN_ACTIONS)})"
+                f"unknown action: {action!r} "
+                f"(known: {', '.join((*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS))})"
             )
         service = _service(req.get("service"), required=(action != "fix"))
         argv = [CLIXZ_BIN, str(action)]
@@ -106,7 +152,7 @@ def build_argv(req: dict) -> list[str]:
 
     raise RequestError(
         f"command not allowed: {cmd!r} (read: {', '.join(READ_COMMANDS)}; "
-        f"plan: {', '.join(PLAN_ACTIONS)})"
+        f"plan: {', '.join((*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS))})"
     )
 
 

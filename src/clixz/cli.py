@@ -361,7 +361,11 @@ def check_cmd(
     stray = unknown_category_dirs(ctx.config) if not service else []
     errors = sum(1 for r in reports for f in r.findings if f.severity is Severity.ERROR)
     warns = sum(1 for r in reports for f in r.findings if f.severity is Severity.WARN)
-    lint_errors = sum(1 for fs in lint.values() for f in fs if f.level == "error")
+    # Counted per level: the closing line used to give permission warnings
+    # only, next to a list full of compose warnings it did not count.
+    lint_levels = {level: sum(1 for fs in lint.values() for f in fs if f.level == level)
+                   for level in ("error", "warn", "info")}
+    lint_errors = lint_levels["error"]
     ignored = (sum(len(r.ignored) for r in reports)
                + sum(len(fs) for fs in lint_ignored.values()))
 
@@ -384,7 +388,8 @@ def check_cmd(
             ],
             "unknown_directories": [str(p) for p in stray],
             "summary": {"errors": errors, "warnings": warns, "lint_errors": lint_errors,
-                        "ignored": ignored},
+                        "lint_warnings": lint_levels["warn"],
+                        "lint_infos": lint_levels["info"], "ignored": ignored},
         })
         raise typer.Exit(code=1 if (errors or raw_issues) else 0)
 
@@ -418,11 +423,13 @@ def check_cmd(
         console.print(f"[yellow]![/yellow] {path} is not a declared category")
 
     console.print(
-        f"\n[dim]{len(reports)} target(s) — "
-        f"{errors} error(s), {warns} warning(s), {lint_errors} compose error(s)"
-        + (f", {ignored} ignored" + ("" if verbose else " (--verbose to list them)")
+        f"\n[dim]{len(reports)} target(s)[/dim]\n"
+        f"[dim]  permissions  {errors} error(s), {warns} warning(s)[/dim]\n"
+        f"[dim]  compose      {lint_errors} error(s), {lint_levels['warn']} warning(s), "
+        f"{lint_levels['info']} info[/dim]"
+        + (f"\n[dim]  ignored      {ignored}"
+           + ("" if verbose else " (--verbose to list them)") + "[/dim]"
            if ignored else "")
-        + ".[/dim]"
     )
     if errors:
         console.print("[dim]Run `clixz fix` to repair the permission findings.[/dim]")

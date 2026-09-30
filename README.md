@@ -1,237 +1,159 @@
 # clixz
 
-CLI to manage Docker services under `/srv/docker` following clixz rules
-(ownership, permissions, POSIX ACLs).
+CLI to inventory, check and create the Docker services under `/srv/docker`.
 
-Replaces `check_fix_permission.zsh` + `services.zsh` with a single typed Python
-tool driven by a YAML configuration.
+It is a tool **for the operator**: see what is deployed, verify it still matches
+the rules, scaffold a new service, keep its metadata. It is not a compose
+generator and not a security engine.
+
+## What changed in 2.0
+
+v1 tried to make bad configurations *inexpressible*: `compose.yaml` was rendered
+from a closed typed structure (`spec.json`), and anything the structure could
+not describe simply could not be deployed. The reasoning was sound and the
+outcome was not — a closed model meets a service that needs a published port, a
+USB device or host networking, and it reopens. The repository showed it: an
+`Exceptions` dataclass with ten fields, then an `/etc/clixz/elevated.yaml`
+allowlist, both added to widen a model that had been narrowed deliberately.
+
+An audit of the running infrastructure on 2026-08-29 settled it. Roughly 70 % of
+the system's effort went into filesystem permissions, while ~90 % of the real
+risk sat in three privileged containers and in what the reverse proxy published
+to the internet — including the MCP server itself, which nothing in clixz could
+see because the exposure lived in a database and every check looked at files.
+
+So 2.0 moves the effort:
+
+| v1 | v2 |
+|---|---|
+| `spec.json` → generated `compose.yaml`, "do not hand-edit" | `compose.yaml` is the source of truth; `clixz new` writes a hardened template you edit |
+| Reject what the model cannot express | `clixz check` lints and **warns**; it never rewrites |
+| Seven path rules + a POSIX ACL engine | Three rules, no ACLs at all |
+| `clixz-runnerd` + `clixz-admind` (root, CAP_DAC_OVERRIDE) | one unprivileged `clixz-mcpd` that cannot write |
+| Nothing looked at the reverse proxy | `clixz exposed` cross-checks it |
+| 6 126 lines | ~2 700 lines |
+
+`docs/REFONTE.md` records the reasoning and the decisions; `docs/TODO-OPXYZ.md`
+lists the host-side actions the audit produced.
 
 ## Install
 
-clixz is published on PyPI as the [`clixz`](https://pypi.org/project/clixz/)
-package — the installed command stays `clixz`. It needs root for most operations
-(`chown` / `setfacl`), so install it **system-wide**. Commands that need root
-re-exec themselves through `sudo` automatically — you no longer have to prefix
-them yourself (set `CLIXZ_NO_SUDO=1` to opt out, e.g. in containers running as
-root).
+Published on PyPI as [`clixz`](https://pypi.org/project/clixz/). Write commands
+need root (`chown`/`chmod`), so install it system-wide:
 
 ```bash
-sudo apt install -y pipx
-
-# Install into an isolated venv under /opt, with the binary on the system PATH.
 sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install clixz
 ```
 
-> With pipx ≥ 1.5 you can use the shorter `sudo pipx install --global clixz`
-> instead. Debian 12 ships pipx 1.4.3, which needs the `env` form above.
+Write commands re-exec themselves through `sudo` automatically — set
+`CLIXZ_NO_SUDO=1` to opt out (containers, CI, and `clixz-mcpd`, which must never
+gain privilege).
 
-Then run:
-
-```bash
-clixz check
-```
-
-Optionally enable shell completion for your user (no sudo):
-
-```bash
-clixz --install-completion
-```
-
-Once installed, completion suggests service names for commands that take a
-service argument (`check`, `apply`, `dev add/remove`, `meta scaffold/validate`),
-categories for `-C/--category`, and existing images for `image remove`.
-
-### Update
-
-```bash
-sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade clixz
-```
-
-### Migrating from a manual install
-
-Earlier setups used hand-written `clixz` / `clixz-update` wrapper scripts and a
-venv in `/usr/local/libexec/clixz`. Remove them before installing from PyPI:
-
-```bash
-sudo rm -f  /usr/local/bin/clixz /usr/local/bin/clixz-update
-sudo rm -rf /usr/local/libexec/clixz
-rm -f ~/.zsh/completions/_clixz ~/.zsh/completions/_coxyz ~/.zcompdump*   # stale completion artefacts (incl. pre-rename)
-```
-
-(`/etc/clixz/config.yaml` is kept — it is your configuration, not part of the
-install.)
-
-## Configuration
-
-`clixz` reads, in order: `--config FILE`, `/etc/clixz/config.yaml`,
-`~/.config/clixz/config.yaml`, then the bundled defaults.
-
-```bash
-clixz show-config       # inspect the resolved config
-clixz edit              # create/edit /etc/clixz/config.yaml (seeded from defaults)
-```
-
-Example excludes in `config.yaml`:
-
-```yaml
-exclude:
-  - "*.bak"
-  - "*/do_not_touch/"
-```
+Optional shell completion for your user: `clixz --install-completion`.
 
 ## Commands
 
 ```bash
-clixz list                      # list services with image, ports, status
-clixz list -C apps              # filter by category
+# read
+clixz ls [-C apps]              # services with image and published ports
+clixz ls --archived
+clixz show apps/atuin           # permissions, compose lint, paths, one screen
+clixz check [service]           # audit + lint. exit 1 on a permission error
+clixz exposed                   # what NPM publishes vs what service.yaml declares
 
-clixz check                     # validate config + audit all services (exit 1 on drift)
-clixz check bitwarden           # audit one service
-clixz check apps/bitwarden -v   # verbose (show OK findings too)
+# write  (each accepts --plan: prints what it would do, writes nothing)
+clixz new apps/myapp            # tree + hardened compose template + .env + service.yaml
+clixz fix [service]             # repair ownership and modes
+clixz rm apps/myapp             # archive under .archive/  (--force deletes, TTY only)
 
-clixz apply                     # preview planned fixes, confirm, then apply
-clixz apply bitwarden -y
-
-clixz create                    # interactive prompts, confirm, then create
-clixz create -C apps -n myapp -y
-
-clixz manifest                  # aggregate every service.yaml → API manifest
-clixz manifest --dry-run        # validate + preview without writing
-clixz meta scaffold apps/nginx  # add a service.yaml template to an existing service
-clixz meta validate             # validate all service.yaml descriptors
-
-clixz dev add apps/nginx        # make a service editable via code-server
-clixz dev remove apps/nginx     # revoke it
-clixz dev list                  # show dev-enabled services
-
-clixz image add api             # scaffold a self-built image context in /opt/images
-clixz image remove api          # delete an image build context
-clixz image list                # list image build contexts
-
-clixz show-config               # print resolved config
-clixz edit                      # edit /etc/clixz/config.yaml
+# housekeeping
+clixz meta [service] [--scaffold]
+clixz manifest [--dry-run]
+clixz image add|rm|ls <name>
+clixz config [--migrate] [--edit]
 ```
 
-Most operations require root (`chown` / `setfacl`). clixz elevates itself with
-`sudo` automatically when needed, so the examples above work without a prefix
-(use `CLIXZ_NO_SUDO=1` to disable auto-elevation).
+Every command takes `--json` for machine-readable output. That is what
+`clixz-mcpd` consumes.
 
-## How it works
-
-- **Config** (`/etc/clixz/config.yaml` or bundled default) defines:
-  - root dir, ACL principals, authorized categories
-  - `exclude` glob patterns to ignore paths during audit/apply
-  - per-path rules: mode, ACL perms, optional owner override, audit-only flag
-- **`check`**: read-only. First validates the config's *structure* (missing keys,
-  bad values, sections nested in the wrong place), then audits permissions/ACL —
-  reporting drift and warn-only (`data/`, `.env`).
-- **`apply`**: shows planned changes, asks for confirmation, then applies fixes.
-  - Touches: category/service dirs, `compose.yaml`, the `config/` directory.
-  - Never touches: `data/` contents, `.env` files (audit-only).
-  - Creates required missing directories before applying path fixes.
-- **Dev-mode awareness**: both `check` and `apply` first read the code-server
-  compose to learn which services are dev-enabled. For those services the dev
-  principal's recursive ACL **and** the default ACL on `config/` and `data/` are
-  treated as *expected* — not drift — and any fix is non-destructive (it never
-  uses `setfacl --set`/`-b`, which would wipe the dev grant). A leftover dev ACL
-  on a service that is *not* dev-enabled is still correctly flagged for removal.
-- **`create`**: scaffolds `<category>/<service>/{config/,data/}` plus **empty**
-  `compose.yaml` and `.env`, a `service.yaml` template, with correct owners +
-  perms + ACL. It does not template `compose.yaml` — you fill it in. Then it
-  refreshes the dashboard manifest.
-- **`service.yaml`** (dashboard descriptor): a per-service file describing how
-  the service appears on the clixz dashboard — `name`, `icon`, `description`,
-  `public` (true ⇒ exposed by the API, false ⇒ hidden entirely), optional
-  `url`/`kind`/`container`/`tags`, and a `details:` block (summary, features,
-  internal `ports`, `depends_on`, `tech`). Put only **non-sensitive** info here.
-  Its permissions are governed by the `service_file` rule (default `640`).
-- **`manifest`**: reads every `service.yaml`, validates it, and aggregates the
-  **public** ones into the JSON file at `api.manifest`
-  (default `/srv/docker/apps/api/data/manifest.json`, mode `644`), which the
-  clixz-api container mounts read-only and serves at `/api/services`. Private
-  descriptors never reach the manifest.
-- **`meta scaffold <service>`**: drops a `service.yaml` template into an existing
-  service (won't overwrite). **`meta validate`**: validates descriptors only.
-- **`check`** also validates every `service.yaml` (a missing one is a warning; a
-  malformed one is an error that fails the check).
-- **Self-built images** live **outside** the service tree, in their own build
-  context under `images.dir` (default `/opt/images/<name>/` — Dockerfile +
-  sources). The matching service under `/srv/docker` stays empty: it just
-  *consumes* the built image, exactly like a third-party image. Same convention
-  for source repos under `repos.dir` (default `/opt/repos`).
-  - **`image add/remove/list`**: `add` scaffolds `<images.dir>/<name>/` with the
-    configured `owner`/`mode` (default `boxyz_dev:boxyz_dev`, `775`) plus a
-    Dockerfile template; `remove` deletes the whole context; `list` shows each
-    context with its Dockerfile/compliance.
-  - The `775` mode means the dev principal's group can edit while *others* (the
-    root Komodo Periphery process) can read — so Komodo builds the context with
-    no per-service ACL and **without** touching `/srv/docker` isolation.
-  - Configure the locations under the `images:` and `repos:` sections; `check`/
-    `apply` then enforce the owner/mode of every `<dir>/<name>` directory.
-  - Optional `acl:` on either section adds named ACL entries on every
-    `<dir>/<name>` directory (same `{ principal: perms }` form as a rule), for
-    when owner/mode alone isn't enough:
-
-    ```yaml
-    repos:
-      dir: /opt/repos
-      owner: "boxyz_dev:boxyz_dev"
-      mode: "775"
-      acl:
-        komodo: "rx"   # grant the komodo principal read+exec via ACL
-    ```
-
-  ```bash
-  # Build with Komodo (or the CLI): context = the image's own directory.
-  docker build -t api-clixz:latest /opt/images/api
-  ```
-- **`list`**: parses each `compose.yaml` for image/ports and runs an audit
-  to show a compliance status.
-- **`dev add/remove/list`**: makes a service editable through code-server.
-  `add` grants the `dev.principal` group (default `boxyz_dev`) a recursive
-  read/write ACL on the service's `config/` and `data/` (existing files **and**
-  a default ACL so new files inherit it), and mounts both dirs into the
-  code-server compose under `/workspace/services/<category>/<service>/`. `remove`
-  revokes *only* that group's ACL entry and unmounts. The managed mounts live in
-  a marker-delimited block (`# >>> clixz dev ... >>>`) that is the single source
-  of truth — `list` reads it; everything else in the compose is left untouched.
-  Configured under the `dev:` key in `config.yaml`.
-
-### ACL handling
-
-A path governed by an ACL rule is brought to compliance with a **single
-`setfacl --set` call** that writes the base entries (`u::`/`g::`/`o::`, i.e. the
-octal mode) and the named entries together. `setfacl` then recomputes the ACL
-*mask* as the union of the owning group and every named entry, so each entry
-stays fully effective — `getfacl` never shows an `#effective:` restriction.
-
-`clixz` deliberately never runs `chmod` on an ACL-managed path: a `chmod` after
-a `setfacl` would rewrite the mask instead of the group bits and silently shrink
-the effective rights of every named entry.
-
-One consequence: when a named entry grants more than the owning group (e.g. a
-principal with `rw` on a `750` directory), the mask widens and `ls -l` shows the
-wider group digit (`770`). That is correct POSIX behaviour — the audit compares
-ACL entries, not the displayed mode.
-
-## File layout (enforced)
+## Layout
 
 ```
 /srv/docker/<category>/<service>/
-├── compose.yaml      660  svc_<cat>:svc_<cat>  + ACL principals
-├── config/           750  svc_<cat>:svc_<cat>  + ACL principals
-│   └── ...           (contents not audited)
-└── data/             750  svc_<cat>:svc_<cat>  no ACL (audit only)
+├── compose.yaml     640   source of truth — edit it
+├── .env             600   root:root, secrets
+├── service.yaml     640   dashboard/MCP metadata
+├── config/          750   inputs, mounted :ro
+└── data/            750   state, written by the container
+```
+
+Contents of `config/` and `data/` are never audited and never touched. A
+recursive chown across a running container's state directory is a good way to
+break it, and clixz has no opinion about what a service stores.
+
+## Configuration
+
+Read from `--config FILE`, then `/etc/clixz/config.yaml`, then
+`~/.config/clixz/config.yaml`, then the bundled defaults.
+
+```yaml
+root_dir: /srv/docker
+categories:
+  apps: { user: svc_apps, group: svc_apps }
+rules:
+  dir:  { mode: "750" }                        # category/, service/, config/, data/
+  file: { mode: "640" }                        # compose.yaml, service.yaml
+  env:  { mode: "600", owner: "root:root" }    # .env
+npm:
+  database: /srv/docker/network/npm/data/app/database.sqlite
+```
+
+`clixz config --migrate` prints a v2 translation of a v1 file. It carries the
+identity forward (root_dir, categories, exclude, manifest, images) and **drops**
+the ACL sections rather than translating them — they have no v2 equivalent, and
+that is the point.
+
+### Why the per-category accounts stay, and the ACLs do not
+
+The `svc_*` accounts are real isolation: the audit verified that a compromised
+non-root container in one category cannot read another's data. That holds for
+9 of 17 containers — the rest run as root and bypass it by construction, but the
+9 are worth the two lines of config.
+
+The ACLs were not. The `komodo` principal granted access to a process running as
+uid 0 with the Docker socket, which already reads and writes everything. The
+`dev` principal served code-server, which is not deployed. The `docker:r` entry
+on `.env` had no reader either — the Docker daemon reads env files as root. All
+three are gone, and with them `setfacl`, the ACL mask, and the whole class of
+"the mode you see is not the mode that applies" confusion.
+
+`clixz check` still *detects* leftover ACL entries from v1 and `clixz fix`
+clears them with `setfacl -b`.
+
+## The MCP gateway
+
+`clixz-mcpd` is a single unprivileged daemon on a Unix socket, consumed by the
+MCP container. Read verbs run as-is; mutating verbs are forwarded to the CLI
+with `--plan`, which prints the commands it would run and exits without writing.
+The unit carries `ReadOnlyPaths=/srv/docker`, so this is not a policy the daemon
+enforces on itself — it is a thing it cannot do.
+
+The approval loop still exists. It goes through the keyboard: the model proposes
+a plan, you run `sudo clixz fix …`.
+
+```bash
+sudo cp deploy/clixz-mcpd.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now clixz-mcpd
 ```
 
 ## Development
 
 ```bash
 make test       # run the test suite
-make build      # build sdist + wheel into dist/
+make lint       # ruff on src/ and tests/ (pip install -e '.[dev]')
+make build      # sdist + wheel into dist/
 make release    # tag the current version and push (CI publishes to PyPI)
 ```
 
-Releasing: bump `__version__` in `src/clixz/__init__.py`, commit, then
-`make release`. The tag `vX.Y.Z` triggers `.github/workflows/publish.yml`,
-which publishes to PyPI via Trusted Publishing.
+Releasing: bump `__version__` in `src/clixz/__init__.py`, commit, `make release`.
+The `vX.Y.Z` tag triggers `.github/workflows/publish.yml`.

@@ -1,4 +1,4 @@
-"""Tests for `archive`: nothing is destroyed unless --force is explicitly given."""
+"""Archiving instead of deleting."""
 
 from __future__ import annotations
 
@@ -6,124 +6,59 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from clixz.archive import ARCHIVE_DIRNAME, archive_root, archive_service, list_archived
-from clixz.config import CategoryConfig, Config, PrincipalConfig, RuleConfig, SettingsConfig
+from clixz.archive import archive_root, archive_service, list_archived
+from clixz.config import parse_config
 
 
-def _config(root: Path) -> Config:
-    return Config(
-        root_dir=root,
-        settings=SettingsConfig(principals={"komodo": PrincipalConfig(name="root", kind="group")}),
-        categories={"apps": CategoryConfig(user="root", group="root")},
-        rules={"service_dir": RuleConfig(mode="750")},
-        exclude=[],
-    )
-
-
-def _service(root: Path, name: str = "demo") -> Path:
-    svc = root / "apps" / name
-    (svc / "data").mkdir(parents=True)
-    (svc / "compose.yaml").write_text("services:\n  demo:\n    image: nginx\n", encoding="utf-8")
-    (svc / ".env").write_text("SECRET=hunter2\n", encoding="utf-8")
-    (svc / "data" / "db.sqlite").write_text("payload", encoding="utf-8")
-    return svc
+def _config(root: Path) -> object:
+    return parse_config({
+        "root_dir": str(root),
+        "categories": {"apps": {"user": "root", "group": "root"}},
+    })
 
 
 class ArchiveTests(unittest.TestCase):
-    def test_moves_the_tree_instead_of_deleting_it(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            svc = _service(root)
-            result = archive_service(_config(root), "apps", "demo", dry_run=False)
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.config = _config(self.root)
+        self.svc = self.root / "apps" / "demo"
+        (self.svc / "data").mkdir(parents=True)
+        (self.svc / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
 
-            self.assertFalse(svc.exists())
-            self.assertIsNotNone(result.destination)
-            self.assertTrue(result.destination.is_dir())
-            # Contents survive intact, including data and secrets.
-            self.assertEqual(
-                (result.destination / ".env").read_text(encoding="utf-8"), "SECRET=hunter2\n"
-            )
-            self.assertEqual(
-                (result.destination / "data" / "db.sqlite").read_text(encoding="utf-8"), "payload"
-            )
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
 
-    def test_archive_root_is_readable_but_root_owned(self) -> None:
-        # Readable on purpose: an operator must be able to see what was
-        # archived without sudo. Secrets stay protected by their own mode —
-        # mv preserves permissions, so an archived .env keeps 600 root:root.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _service(root)
-            archive_service(_config(root), "apps", "demo", dry_run=False)
-            mode = archive_root(_config(root)).stat().st_mode & 0o777
-            self.assertEqual(mode, 0o755)
+    def test_moves_the_tree_under_archive(self) -> None:
+        result = archive_service(self.config, "apps", "demo", dry_run=False)
+        self.assertFalse(self.svc.exists())
+        self.assertTrue((result.destination / "compose.yaml").is_file())
 
-    def test_archive_dir_is_hidden_from_category_discovery(self) -> None:
-        # `.archive` is a dotted name and not a configured category, so the
-        # normal walk cannot mistake it for one.
-        self.assertTrue(ARCHIVE_DIRNAME.startswith("."))
-        self.assertNotIn(ARCHIVE_DIRNAME, _config(Path("/tmp")).categories)
+    def test_archived_service_disappears_from_listings(self) -> None:
+        archive_service(self.config, "apps", "demo", dry_run=False)
+        from clixz.policy import list_services
+        self.assertEqual([], list_services(self.config))
 
-    def test_force_deletes_and_leaves_no_archive(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            svc = _service(root)
-            result = archive_service(_config(root), "apps", "demo", dry_run=False, force=True)
-
-            self.assertFalse(svc.exists())
-            self.assertTrue(result.forced)
-            self.assertIsNone(result.destination)
-            self.assertFalse(archive_root(_config(root)).exists())
+    def test_list_archived_finds_it(self) -> None:
+        archive_service(self.config, "apps", "demo", dry_run=False)
+        entries = list_archived(self.config)
+        self.assertEqual([("apps", "demo")], [(c, s) for c, s, _, _ in entries])
 
     def test_dry_run_changes_nothing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            svc = _service(root)
-            archive_service(_config(root), "apps", "demo", dry_run=True)
-            self.assertTrue(svc.is_dir())
-            self.assertTrue((svc / ".env").is_file())
+        archive_service(self.config, "apps", "demo", dry_run=True)
+        self.assertTrue(self.svc.exists())
+        self.assertFalse(archive_root(self.config).exists())
 
-    def test_rejects_unknown_service(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _service(root)
-            with self.assertRaises(RuntimeError):
-                archive_service(_config(root), "apps", "ghost", dry_run=False)
+    def test_unknown_service_raises(self) -> None:
+        with self.assertRaises(RuntimeError):
+            archive_service(self.config, "apps", "ghost", dry_run=False)
 
-    def test_refuses_a_symlinked_service_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "apps").mkdir(parents=True)
-            outside = root / "elsewhere"
-            outside.mkdir()
-            (outside / "keep.txt").write_text("important", encoding="utf-8")
-            (root / "apps" / "demo").symlink_to(outside)
-
-            with self.assertRaises(RuntimeError):
-                archive_service(_config(root), "apps", "demo", dry_run=False, force=True)
-            self.assertTrue((outside / "keep.txt").is_file())
-
-    def test_list_archived_reports_entries(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _service(root, "one")
-            _service(root, "two")
-            cfg = _config(root)
-            archive_service(cfg, "apps", "one", dry_run=False)
-            archive_service(cfg, "apps", "two", dry_run=False)
-
-            entries = list_archived(cfg)
-            self.assertEqual({(c, s) for c, s, _, _ in entries}, {("apps", "one"), ("apps", "two")})
-
-    def test_list_archived_skips_the_updates_folder(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cfg = _config(root)
-            updates = archive_root(cfg) / "apps" / "demo" / "updates"
-            updates.mkdir(parents=True)
-            (updates / "20260101T000000Z-compose.yaml").write_text("x", encoding="utf-8")
-            self.assertEqual(list_archived(cfg), [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_a_symlinked_service_is_refused(self) -> None:
+        # Otherwise `mv` would move whatever it points at, anywhere on the host.
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.root / "apps" / "linked"
+        link.symlink_to(outside)
+        with self.assertRaises(RuntimeError):
+            archive_service(self.config, "apps", "linked", dry_run=False)
+        self.assertTrue(outside.exists())

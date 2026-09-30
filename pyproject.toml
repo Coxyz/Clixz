@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clixz"
 dynamic = ["version"]
-description = "CLI to manage Docker services under /srv/docker (ownership, permissions, ACLs)"
+description = "CLI to inventory, check and create the Docker services under /srv/docker"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "clixz" }]
-keywords = ["docker", "acl", "permissions", "cli", "sysadmin"]
+keywords = ["docker", "compose", "permissions", "cli", "sysadmin", "homelab"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",
@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 release = ["bump-my-version>=0.20"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.urls]
 Homepage = "https://github.com/Coxyz/Clixz"
@@ -33,12 +34,10 @@ Issues = "https://github.com/Coxyz/Clixz/issues"
 
 [project.scripts]
 clixz = "clixz.cli:app"
-# Privileged daemon, started by systemd as root. Installing it as a console
-# script places its code under the root-owned venv, so the ExecStart target
-# cannot be rewritten by an application group.
-clixz-admind = "clixz.admind:main"
-# Unprivileged gateway for the MCP container; same reasoning on the install path.
-clixz-runnerd = "clixz.runnerd:main"
+# Unprivileged gateway for the MCP container. Installed as a console script so
+# its code lands under the root-owned venv: the ExecStart target cannot be
+# rewritten by an application group.
+clixz-mcpd = "clixz.mcpd:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "clixz.__version__" }
@@ -49,10 +48,21 @@ where = ["src"]
 [tool.setuptools.package-data]
 clixz = ["default_config.yaml"]
 
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+# The CLI turns an exception into a message and `raise typer.Exit(1)`; chaining
+# the cause there would only add a traceback nobody is shown.
+ignore = ["B904"]
+
 # `make release` drives this: bumps the version, commits, and creates a vX.Y.Z
 # tag. Pushing that tag triggers .github/workflows/publish.yml → PyPI.
 [tool.bumpversion]
-current_version = "1.2.1"
+current_version = "2.0.0"
 allow_dirty = false
 commit = true
 message = "Bump version: {current_version} → {new_version}"

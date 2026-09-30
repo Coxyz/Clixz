@@ -1,21 +1,25 @@
 # Developer convenience targets. End users install with pipx (see README).
 
-VERSION := $(shell python3 -c "import sys; sys.path.insert(0, 'src'); import coxyz; print(coxyz.__version__)")
+VERSION := $(shell python3 -c "import sys; sys.path.insert(0, 'src'); import clixz; print(clixz.__version__)")
 
 # Which part of the version `make release` bumps: patch (default), minor, major.
 PART ?= patch
 
-.PHONY: help test build clean release
+.PHONY: help test lint build clean release
 
 help:
 	@echo "make test                  - run the test suite"
+	@echo "make lint                  - run ruff on src/ and tests/"
 	@echo "make build                 - build sdist + wheel into dist/"
 	@echo "make clean                 - remove build artefacts"
 	@echo "make release [PART=patch]  - bump v$(VERSION), commit, tag & push (CI publishes to PyPI)"
 	@echo "                             PART = patch | minor | major"
 
 test:
-	python3 -m unittest discover -s tests -v
+	PYTHONPATH=src python3 -m pytest tests -q
+
+lint:
+	python3 -m ruff check src tests
 
 build: clean
 	python3 -m pip install --upgrade build

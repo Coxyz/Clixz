@@ -5,10 +5,10 @@ the Dockerfile and sources — **separate** from the service tree under
 ``root_dir``. The matching service in ``/srv/docker`` stays empty (it just
 *consumes* the built image, like any third-party image).
 
-Each image directory follows the ``/opt/repos`` convention: owned by the dev
-principal (editable via code-server), world-readable so Komodo Periphery can
-read the build context to build. clixz creates them with the right owner/mode
-and scaffolds a Dockerfile; ``check``/``apply`` keep the owner/mode in sync.
+clixz scaffolds the directory and a Dockerfile, and stops there. v1 also
+enforced an owner and a mode on every context; the audit found that rule was
+the source of the only permanent drift in ``clixz check``, protecting nothing —
+these are development directories, not a service tree.
 """
 
 from __future__ import annotations

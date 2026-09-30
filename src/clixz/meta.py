@@ -17,13 +17,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import yaml
 
 from .config import Config
-from .policy import is_excluded_path, list_services
+from .policy import is_excluded, list_services
 
 SERVICE_FILENAME = "service.yaml"
 MANIFEST_SCHEMA = 1
@@ -262,7 +261,7 @@ def build_manifest(config: Config) -> ManifestResult:
 
     for cat, svc, path in list_services(config):
         descriptor = path / SERVICE_FILENAME
-        if is_excluded_path(config, descriptor):
+        if is_excluded(config, descriptor):
             continue
         if not descriptor.is_file():
             warnings.append(f"{cat}/{svc}: no {SERVICE_FILENAME}")
@@ -299,3 +298,23 @@ def build_manifest(config: Config) -> ManifestResult:
 def manifest_json(manifest: dict[str, Any]) -> str:
     """Serialise a manifest to pretty JSON with a trailing newline."""
     return json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+
+
+def declared_urls(config: Config) -> dict[str, str]:
+    """``{"category/service": url}`` for every descriptor that declares one.
+
+    Used by ``clixz exposed`` to compare what the tree says is public against
+    what the reverse proxy actually publishes.
+    """
+    out: dict[str, str] = {}
+    for cat, svc, path in list_services(config):
+        descriptor = path / SERVICE_FILENAME
+        if not descriptor.is_file():
+            continue
+        try:
+            raw = yaml.safe_load(descriptor.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(raw, dict) and raw.get("url"):
+            out[f"{cat}/{svc}"] = str(raw["url"])
+    return out

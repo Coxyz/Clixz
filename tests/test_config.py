@@ -1,86 +1,119 @@
-"""Tests for config structural validation (used by `clixz check`)."""
+"""Config parsing, structural validation, and the v1 → v2 migration."""
 
 from __future__ import annotations
 
 import unittest
 
-from clixz.config import validate_config
-
-_REQUIRED_RULES = ["category_dir", "service_dir", "compose_file", "config_dir", "data_dir", "env_file"]
+from clixz.config import DEFAULT_RULES, migrate_raw, parse_config, validate_config
 
 
-def _good() -> dict:
+def _v2() -> dict:
     return {
         "root_dir": "/srv/docker",
-        "settings": {"principals": {"komodo": {"name": "komodo_runner", "kind": "group"}}},
         "categories": {"apps": {"user": "svc_apps", "group": "svc_apps"}},
-        "rules": {r: {"mode": "750"} for r in _REQUIRED_RULES},
+        "rules": {"dir": {"mode": "750"}, "file": {"mode": "640"},
+                  "env": {"mode": "600", "owner": "root:root"}},
     }
 
 
-class ValidateConfigTests(unittest.TestCase):
-    def test_good_config_has_no_issues(self) -> None:
-        self.assertEqual([], validate_config(_good()))
+def _v1() -> dict:
+    return {
+        "root_dir": "/srv/docker",
+        "settings": {"principals": {"komodo": {"name": "boxyz_komodo", "kind": "group"}}},
+        "categories": {"apps": {"user": "svc_apps", "group": "svc_apps"}},
+        "rules": {
+            "category_dir": {"mode": "750", "acl": {"komodo": "rx"}},
+            "service_dir": {"mode": "750", "acl": {"komodo": "rx"}},
+            "compose_file": {"mode": "660", "acl": {"komodo": "rw"}},
+            "config_dir": {"mode": "750"},
+            "data_dir": {"mode": "750"},
+            "env_file": {"mode": "600", "owner": "root:root", "acl": {"docker": "r"}},
+        },
+        "dev": {"compose": "/srv/docker/apps/code-boxyz/compose.yaml"},
+        "repos": {"dir": "/opt/repos"},
+        "api": {"manifest": "/srv/docker/apps/api/data/manifest.json"},
+    }
+
+
+class ValidateTests(unittest.TestCase):
+    def test_clean_v2_config_has_no_issues(self) -> None:
+        self.assertEqual([], validate_config(_v2()))
 
     def test_missing_root_dir(self) -> None:
-        cfg = _good()
+        cfg = _v2()
         del cfg["root_dir"]
         self.assertTrue(any("root_dir" in i for i in validate_config(cfg)))
 
-    def test_missing_required_rule_is_reported(self) -> None:
-        cfg = _good()
-        del cfg["rules"]["env_file"]
-        self.assertTrue(any("env_file" in i for i in validate_config(cfg)))
+    def test_retired_rule_names_point_at_their_replacement(self) -> None:
+        issues = validate_config(_v1())
+        self.assertTrue(any("rules.compose_file" in i and "rules.file" in i for i in issues))
+        self.assertTrue(any("rules.env_file" in i and "rules.env" in i for i in issues))
 
-    def test_principal_bad_kind(self) -> None:
-        cfg = _good()
-        cfg["settings"]["principals"]["komodo"]["kind"] = "nope"
-        self.assertTrue(any("kind" in i for i in validate_config(cfg)))
+    def test_retired_sections_explain_themselves(self) -> None:
+        issues = validate_config(_v1())
+        self.assertTrue(any(i.startswith("'settings' was retired") for i in issues))
+        self.assertTrue(any(i.startswith("'dev' was retired") for i in issues))
+        self.assertTrue(any(i.startswith("'repos' was retired") for i in issues))
 
-    def test_rule_recursive_must_be_bool(self) -> None:
-        cfg = _good()
-        cfg["rules"]["config_dir"]["recursive"] = "yes"
-        self.assertTrue(any("recursive" in i for i in validate_config(cfg)))
+    def test_unknown_rule_is_reported(self) -> None:
+        cfg = _v2()
+        cfg["rules"]["sockets"] = {"mode": "660"}
+        self.assertTrue(any("unknown rule 'sockets'" in i for i in validate_config(cfg)))
 
-    def test_rule_recursive_bool_is_accepted(self) -> None:
-        cfg = _good()
-        cfg["rules"]["config_dir"]["recursive"] = True
-        self.assertEqual([], validate_config(cfg))
-
-    def test_external_dir_recursive_must_be_bool(self) -> None:
-        cfg = _good()
-        cfg["images"] = {"dir": "/opt/images", "recursive": "yes"}
-        self.assertTrue(any("images.recursive" in i for i in validate_config(cfg)))
-
-    def test_external_dir_dockerfile_recursive_must_be_bool(self) -> None:
-        cfg = _good()
-        cfg["images"] = {"dir": "/opt/images", "dockerfile": {"mode": "664", "recursive": "yes"}}
-        self.assertTrue(
-            any("images.dockerfile.recursive" in i for i in validate_config(cfg))
-        )
-
-    def test_dev_nested_under_settings_is_flagged(self) -> None:
-        # The exact mistake that broke `clixz dev`: dev indented under settings.
-        cfg = _good()
-        cfg["settings"]["dev"] = {"principal": "dev"}
-        issues = validate_config(cfg)
-        self.assertTrue(any("settings.dev" in i for i in issues), issues)
-
-    def test_unknown_top_level_key_is_flagged(self) -> None:
-        cfg = _good()
-        cfg["compose_template"] = {"default_internal_port": 8080}
-        self.assertTrue(any("compose_template" in i for i in validate_config(cfg)))
-
-    def test_dev_principal_unresolvable(self) -> None:
-        cfg = _good()
-        cfg["dev"] = {"principal": "ghost"}
-        self.assertTrue(any("dev.principal" in i for i in validate_config(cfg)))
-
-    def test_dev_principal_resolved_by_name(self) -> None:
-        cfg = _good()
-        cfg["dev"] = {"principal": "komodo_runner"}  # the principal's name, not key
-        self.assertEqual([], validate_config(cfg))
+    def test_unknown_top_level_key(self) -> None:
+        cfg = _v2()
+        cfg["nope"] = 1
+        self.assertTrue(any("unknown top-level key 'nope'" in i for i in validate_config(cfg)))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ParseTests(unittest.TestCase):
+    def test_omitted_rules_fall_back_to_defaults(self) -> None:
+        cfg = parse_config({"root_dir": "/srv/docker",
+                            "categories": {"apps": {"user": "u", "group": "g"}}})
+        self.assertEqual(DEFAULT_RULES["dir"].mode, cfg.rule("dir").mode)
+        self.assertEqual("root:root", cfg.rule("env").owner)
+
+    def test_category_owner(self) -> None:
+        cfg = parse_config(_v2())
+        self.assertEqual("svc_apps:svc_apps", cfg.category("apps").owner)
+
+    def test_unknown_category_names_the_known_ones(self) -> None:
+        cfg = parse_config(_v2())
+        with self.assertRaises(KeyError) as ctx:
+            cfg.category("nope")
+        self.assertIn("apps", str(ctx.exception))
+
+    def test_v1_rule_names_are_ignored_rather_than_misapplied(self) -> None:
+        # A v1 file still loads: its retired rules are reported by
+        # validate_config, but they must never silently become v2 rules.
+        cfg = parse_config(_v1())
+        self.assertEqual("640", cfg.rule("file").mode)  # not 660 from compose_file
+
+    def test_npm_section(self) -> None:
+        cfg = parse_config(_v2() | {"npm": {"database": "/tmp/db.sqlite"}})
+        self.assertEqual("/tmp/db.sqlite", str(cfg.npm.database))
+
+    def test_npm_section_is_optional(self) -> None:
+        self.assertIsNone(parse_config(_v2()).npm.database)
+
+
+class MigrateTests(unittest.TestCase):
+    def test_carries_identity_forward(self) -> None:
+        out = migrate_raw(_v1())
+        self.assertEqual("/srv/docker", out["root_dir"])
+        self.assertIn("apps", out["categories"])
+        self.assertEqual("/srv/docker/apps/api/data/manifest.json", out["api"]["manifest"])
+
+    def test_drops_acl_sections_entirely(self) -> None:
+        out = migrate_raw(_v1())
+        self.assertNotIn("settings", out)
+        self.assertNotIn("dev", out)
+        self.assertNotIn("repos", out)
+
+    def test_env_owner_is_forced_regardless_of_the_old_value(self) -> None:
+        raw = _v1()
+        raw["rules"]["env_file"]["owner"] = "svc_apps:svc_apps"
+        self.assertEqual("root:root", migrate_raw(raw)["rules"]["env"]["owner"])
+
+    def test_result_validates_cleanly(self) -> None:
+        self.assertEqual([], validate_config(migrate_raw(_v1())))

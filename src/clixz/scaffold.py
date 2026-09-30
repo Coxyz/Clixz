@@ -1,9 +1,9 @@
-"""Scaffold a new service directory tree.
+"""Create a new service tree, ready to fill in.
 
-``create`` only lays out the structure — the category/service directories,
-``config/`` and ``data/``, plus empty ``compose.yaml`` and ``.env`` files — and
-brings every path to its correct owner/mode/ACL. The operator fills in
-``compose.yaml`` and ``.env`` afterwards.
+Unlike v1, ``compose.yaml`` is not left empty and it is not generated from a
+specification: it is written from a template that already carries the house
+hardening, and it is yours to edit afterwards. The file says so in its first
+line, so nobody has to guess whether editing it is allowed.
 """
 
 from __future__ import annotations
@@ -12,12 +12,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import compose as compose_mod
 from .config import Config
 from .meta import SERVICE_FILENAME, scaffold_template
-from .policy import plan_path
+from .policy import COMPOSE, ENV_FILE, SERVICE_DIRS
 from .system import CommandRunner, group_exists, user_exists
 
-SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$")
+SERVICE_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 
 @dataclass(frozen=True)
@@ -30,19 +31,26 @@ def validate_service_name(name: str) -> None:
     if not SERVICE_NAME_RE.match(name):
         raise ValueError(
             f"Invalid service name '{name}' "
-            "(alphanumeric and hyphens, no leading/trailing hyphen)"
+            "(lowercase letters, digits and hyphens; no leading or trailing hyphen)"
         )
 
 
+def plan_create(config: Config, req: CreateRequest) -> list[list[str]]:
+    """The commands ``create`` would run, without running them."""
+    runner = CommandRunner(dry_run=True)
+    _create(config, req, runner)
+    return runner.executed
+
+
 def create_service(
-    config: Config,
-    req: CreateRequest,
-    *,
-    dry_run: bool,
-    acl_enabled: bool,
-    principals_available: dict[str, bool],
+    config: Config, req: CreateRequest, *, dry_run: bool = False,
 ) -> list[list[str]]:
-    """Create the service tree. Returns the list of commands executed (or planned)."""
+    runner = CommandRunner(dry_run=dry_run)
+    _create(config, req, runner)
+    return runner.executed
+
+
+def _create(config: Config, req: CreateRequest, runner: CommandRunner) -> None:
     validate_service_name(req.service)
     cat = config.category(req.category)
 
@@ -55,36 +63,37 @@ def create_service(
     if svc_path.exists():
         raise RuntimeError(f"Service path already exists: {svc_path}")
 
-    runner = CommandRunner(dry_run=dry_run)
+    dir_rule = config.rule("dir")
+    file_rule = config.rule("file")
+    env_rule = config.rule("env")
 
-    def apply_rule(path: Path, rule_name: str, *, is_dir: bool) -> None:
-        rule = config.rule_or_default(rule_name)
-        owner = rule.owner or cat.owner_spec
-        for command in plan_path(
-            path, rule, owner, config,
-            is_dir=is_dir, acl_enabled=acl_enabled,
-            principals_available=principals_available,
-        ):
-            runner.run(command)
+    def make_dir(path: Path) -> None:
+        runner.run(["mkdir", "-p", str(path)])
+        runner.run(["chown", dir_rule.owner or cat.owner, str(path)])
+        runner.run(["chmod", dir_rule.mode, str(path)])
 
-    # Directory tree (mkdir -p is idempotent, so an existing category dir is fine).
-    apply_rule(config.root_dir / req.category, "category_dir", is_dir=True)
-    apply_rule(svc_path, "service_dir", is_dir=True)
-    apply_rule(svc_path / "config", "config_dir", is_dir=True)
-    apply_rule(svc_path / "data", "data_dir", is_dir=True)
+    def make_file(path: Path, content: str, owner: str, mode: str) -> None:
+        runner.write_file(path, content)
+        runner.run(["chown", owner, str(path)])
+        runner.run(["chmod", mode, str(path)])
 
-    # Empty compose.yaml and .env — left for the operator to fill in.
-    compose_file = svc_path / "compose.yaml"
-    runner.write_file(compose_file, "")
-    apply_rule(compose_file, "compose_file", is_dir=False)
+    make_dir(config.root_dir / req.category)
+    make_dir(svc_path)
+    for name in SERVICE_DIRS:
+        make_dir(svc_path / name)
 
-    env_file = svc_path / ".env"
-    runner.write_file(env_file, "")
-    apply_rule(env_file, "env_file", is_dir=False)
-
-    # service.yaml — dashboard descriptor (template, public: false by default).
-    service_file = svc_path / SERVICE_FILENAME
-    runner.write_file(service_file, scaffold_template(req.category, req.service))
-    apply_rule(service_file, "service_file", is_dir=False)
-
-    return runner.executed
+    make_file(
+        svc_path / COMPOSE,
+        compose_mod.template(config, req.category, req.service),
+        file_rule.owner or cat.owner, file_rule.mode,
+    )
+    make_file(
+        svc_path / SERVICE_FILENAME,
+        scaffold_template(req.category, req.service),
+        file_rule.owner or cat.owner, file_rule.mode,
+    )
+    make_file(
+        svc_path / ENV_FILE,
+        f"# {req.category}/{req.service} — secrets. Never committed, never in service.yaml.\n",
+        env_rule.owner or cat.owner, env_rule.mode,
+    )

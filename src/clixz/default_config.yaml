@@ -1,127 +1,52 @@
-# Default configuration for clixz CLI
-# Override location: /etc/clixz/config.yaml (or --config FILE)
+# clixz configuration — default. Override at /etc/clixz/config.yaml.
+#
+# v2 enforces ownership and modes, and nothing else. There are no ACL
+# principals: Komodo Periphery runs as root and already reads everything, and
+# code-server (the other ACL consumer) is not deployed. `clixz config --migrate`
+# translates a v1 config into this shape.
 
 root_dir: /srv/docker
 
-# Paths to ignore during audit and apply (glob patterns).
-# Examples: "*.bak", "*/do_not_touch/", "apps/legacy/*"
+# Paths to skip during audit and repair (glob patterns).
 exclude: []
 
-settings:
-  principals:
-    komodo:
-      name: komodo_runner
-      kind: group              # "group" or "user"
-    boxyz_dev:
-      name: boxyz_dev
-      kind: group              # group code-server runs as (for `clixz dev`)
-
-# Authorized categories and their owning service account.
-# Format: <category>: { user: <svc_user>, group: <svc_group> }
+# Each category owns its subtree through a dedicated system account. This is
+# what keeps a compromised non-root container in one category out of another's
+# data — the only isolation that survives an attacker already on the host.
 categories:
-  apps:
-    user: svc_apps
-    group: svc_apps
-  automation:
-    user: svc_automation
-    group: svc_automation
-  monitoring:
-    user: svc_monitoring
-    group: svc_monitoring
-  network:
-    user: svc_network
-    group: svc_network
+  apps:        { user: svc_apps,        group: svc_apps }
+  automation:  { user: svc_automation,  group: svc_automation }
+  infra:       { user: svc_infra,       group: svc_infra }
+  monitoring:  { user: svc_monitoring,  group: svc_monitoring }
+  network:     { user: svc_network,     group: svc_network }
 
-# Rules applied to each path kind.
-# - mode: octal mode as string (e.g. "750")
-# - acl:  per-principal ACL perms ("rx", "rw", "rwx", "x") or null to skip
-# - owner: optional "user:group" override (default: category owner)
-# - audit_only: if true, never modify; just report drift
-# - recursive: if true, this rule's owner, mode and `acl` are also (re)applied
-#              to the directory's existing contents (chown -R, setfacl -R
-#              --set or chmod -R) and the ACL is set as a default ACL
-#              (setfacl -dR) so new children inherit it too. Ignored on files.
+# Three rules, applied to a fixed skeleton:
+#   dir   category/, service/, config/, data/   (contents are never touched)
+#   file  compose.yaml, service.yaml
+#   env   .env
 rules:
-  category_dir:
+  dir:
     mode: "750"
-    acl:
-      komodo: "rx"
-
-  service_dir:
-    mode: "750"
-    acl:
-      komodo: "rx"
-
-  compose_file:
-    mode: "660"
-    acl:
-      komodo: "rw"
-
-  # service.yaml — dashboard descriptor (non-sensitive presentation metadata).
-  service_file:
+  file:
     mode: "640"
-    acl: null
-
-  config_dir:
-    mode: "750"
-    acl:
-      komodo: "x"
-
-  data_dir:
-    mode: "750"
-    acl: null
-    audit_only: true
-
-  env_file:
+  env:
     mode: "600"
+    # root:root, not the category account: a container running as the category
+    # user must not be able to read the secrets it is handed by the daemon.
     owner: "root:root"
-    acl: null
-    audit_only: true
 
-# `clixz manifest` aggregates every service.yaml into this JSON file, mounted
-# read-only into the clixz-api container and served at /api/services.
+# `clixz manifest` aggregates the public service.yaml descriptors here. The API
+# container mounts it read-only and serves it at /api/services.
 api:
   manifest: /srv/docker/apps/api/data/manifest.json
 
-# Self-built image build contexts (Dockerfile + sources), one dir per image.
-# `clixz image add/remove/list` manages them; `check`/`apply` enforce owner/mode.
-# Owned by the dev principal (editable via code-server), world-readable so
-# Komodo Periphery can read the build context to build.
-# - acl: optional per-principal ACL on each subdirectory (same form as rules),
-#        or null/omitted to skip. Example below grants komodo read+exec.
-# - recursive: if true, owner/mode/`acl` are also (re)applied to each
-#        subdirectory's existing contents, plus as a default ACL for new
-#        files (see rules above).
-# - dockerfile: optional rule (mode/owner/acl/recursive) for the Dockerfile
-#        inside each image dir. When set, `image add` applies it and
-#        `check`/`apply` enforce it; when omitted the Dockerfile keeps mode 664
-#        and is not audited.
+# Self-built image build contexts (Dockerfile + sources), one directory each.
+# Scaffolded by `clixz image add`; ownership is not audited.
 images:
   dir: /opt/images
-  owner: "boxyz_dev:boxyz_dev"
-  mode: "775"
-  acl: null
-  recursive: false
-  # acl:
-  #   komodo: "rx"
-  # dockerfile:
-  #   mode: "664"
-  #   acl:
-  #     komodo: "r"
 
-# Source repositories (same convention as images).
-repos:
-  dir: /opt/repos
-  owner: "boxyz_dev:boxyz_dev"
-  mode: "775"
-  acl: null
-  # acl:
-  #   komodo: "rx"
-
-# `clixz dev add/remove <service>`: mount a service's config/ and data/ into
-# code-server and grant the `principal` group recursive rw access on them.
-dev:
-  compose: /srv/docker/apps/code-boxyz/compose.yaml   # code-server compose to edit
-  principal: boxyz_dev                                 # key in settings.principals
-  perms: rwx                                           # granted recursively (x -> X)
-  mount_base: /workspace/services                      # in-container mount prefix
+# `clixz exposed` reads this database to compare what the reverse proxy
+# actually publishes against what the service descriptors declare. Read-only,
+# needs root, and degrades to a warning when it cannot be read.
+npm:
+  database: /srv/docker/network/npm/data/app/database.sqlite

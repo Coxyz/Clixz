@@ -42,8 +42,15 @@ Published on PyPI as [`clixz`](https://pypi.org/project/clixz/). Write commands
 need root (`chown`/`chmod`), so install it system-wide:
 
 ```bash
-sudo env PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install clixz
+sudo sh -c 'umask 022 && pipx install --global clixz'
+sudo clixz upgrade          # every later upgrade
 ```
+
+The `umask` matters on a hardened host: with `UMASK 027` in `/etc/login.defs`,
+pipx and uv create an environment only root can read, and `clixz` then fails
+with "permission denied" for everyone else — including `clixz-mcpd`.
+`clixz upgrade` sets it for you and calls the installer that put clixz there
+(pipx or uv), so there is nothing to remember after the first install.
 
 Write commands re-exec themselves through `sudo` automatically — set
 `CLIXZ_NO_SUDO=1` to opt out (containers, CI, and `clixz-mcpd`, which must never
@@ -71,6 +78,7 @@ clixz meta [service] [--scaffold]
 clixz manifest [--dry-run]
 clixz image add|rm|ls <name>
 clixz config [--migrate] [--edit]
+clixz upgrade [--plan]          # upgrade clixz itself, world-readable
 ```
 
 Every command takes `--json` for machine-readable output. That is what

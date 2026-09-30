@@ -1,8 +1,8 @@
 """clixz command line.
 
-Ten verbs, in three groups: read (``ls``, ``show``, ``check``, ``exposed``),
+Twelve verbs, in three groups: read (``ls``, ``show``, ``check``, ``exposed``),
 write (``new``, ``fix``, ``rm``), and housekeeping (``meta``, ``manifest``,
-``image``, ``config``).
+``image``, ``config``, ``upgrade``).
 
 Every write verb accepts ``--plan``: it prints the commands it would run, as
 JSON when asked, and writes nothing. That flag is what lets ``clixz-mcpd``
@@ -60,6 +60,7 @@ from .policy import (
 )
 from .scaffold import CreateRequest, create_service, plan_create
 from .system import CommandExecutionError, missing_bins
+from .upgrade import UMASK, needs_root, plan_upgrade
 
 app = typer.Typer(
     name="clixz",
@@ -789,6 +790,37 @@ def config_cmd(
         for issue in issues:
             console.print(f"[red]✗[/red] {escape(issue)}")
         console.print("[dim]Run `clixz config --migrate` for a v2 translation.[/dim]")
+
+
+@app.command("upgrade")
+def upgrade_cmd(
+    plan: Annotated[bool, typer.Option(
+        "--plan", help="Print the command that would run, and run nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Upgrade clixz itself, with the installer and the umask it needs."""
+    prefix = Path(sys.prefix)
+    upgrade = plan_upgrade(prefix, Path(sys.argv[0]))
+    if upgrade is None:
+        err.print(f"[red]ERROR[/red] {prefix} was installed by neither pipx nor uv; "
+                  "upgrade it the way it was installed.")
+        raise typer.Exit(code=2)
+    if plan:
+        assignments = [f"{key}={value}" for key, value in upgrade.env.items()]
+        return _render_plan([[*assignments, *upgrade.argv]], json_out=json_out,
+                            action="upgrade", target=str(prefix))
+    if shutil.which(upgrade.argv[0]) is None:
+        err.print(f"[red]ERROR[/red] {upgrade.argv[0]} installed clixz but was not found on PATH.")
+        raise typer.Exit(code=2)
+    if needs_root(prefix):
+        ensure_root()
+    # The whole point of this command: see upgrade.py.
+    os.umask(UMASK)
+    try:
+        os.execvpe(upgrade.argv[0], upgrade.argv, {**os.environ, **upgrade.env})
+    except OSError as exc:  # pragma: no cover
+        err.print(f"[red]ERROR[/red] {upgrade.argv[0]} failed: {exc}")
+        raise typer.Exit(code=2)
 
 
 def cli_main() -> None:  # pragma: no cover

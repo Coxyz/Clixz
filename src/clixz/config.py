@@ -5,8 +5,11 @@ Three rules, no ACLs
 v1 carried seven per-path rules and a POSIX ACL engine. The audit of 2026-08-29
 retired both:
 
-- the ``komodo`` ACL was decorative — Komodo Periphery runs as uid 0 with the
-  Docker socket, so it already reads and writes everything;
+- the ``komodo`` ACL let Komodo Periphery read the compose files. The audit
+  called it decorative because Periphery runs as uid 0; it missed that it also
+  drops every capability, and root without CAP_DAC_OVERRIDE obeys file modes.
+  The ACL stays retired, and Periphery's compose carries ``cap_add:
+  [DAC_OVERRIDE]`` instead — nothing the Docker socket had not already given;
 - the ``dev`` ACL served code-server, which is not deployed;
 - the ``docker:r`` ACL on ``.env`` had no reader either: the Docker daemon reads
   env files as root.
@@ -252,7 +255,7 @@ KNOWN_TOP_LEVEL = {"root_dir", "categories", "rules", "exclude", "api", "images"
 # key" — which reads like a typo — into an actionable migration message.
 RETIRED_KEYS = {
     "settings": "ACL principals are gone: v2 uses owner/mode only.",
-    "komodo": "ACL principals are gone: Komodo Periphery runs as root already.",
+    "komodo": "ACL principals are gone: give Komodo Periphery cap_add DAC_OVERRIDE instead.",
     "dev": "`clixz dev` is gone: code-server is not deployed.",
 }
 

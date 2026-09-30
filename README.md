@@ -170,12 +170,27 @@ non-root container in one category cannot read another's data. That holds for
 9 of 17 containers — the rest run as root and bypass it by construction, but the
 9 are worth the two lines of config.
 
-The ACLs were not. The `komodo` principal granted access to a process running as
-uid 0 with the Docker socket, which already reads and writes everything. The
-`dev` principal served code-server, which is not deployed. The `docker:r` entry
-on `.env` had no reader either — the Docker daemon reads env files as root. All
-three are gone, and with them `setfacl`, the ACL mask, and the whole class of
-"the mode you see is not the mode that applies" confusion.
+The ACLs were not. The `dev` principal served code-server, which is not
+deployed. The `docker:r` entry on `.env` had no reader — the Docker daemon reads
+env files as root. All of them are gone, and with them `setfacl`, the ACL mask,
+and the whole class of "the mode you see is not the mode that applies" confusion.
+
+The `komodo` principal is the one the audit got wrong. It reasoned that Komodo
+Periphery runs as uid 0 with the Docker socket and therefore reads everything.
+It does run as uid 0 — with `cap_drop: ALL`, and root without `CAP_DAC_OVERRIDE`
+is subject to file modes like anyone else: the ACL was the only thing letting it
+read a compose file, and removing it locked Komodo out of every stack. The fix
+is not to bring the ACL back but to say what is true in the one place it
+belongs, Periphery's own compose:
+
+```yaml
+    cap_add: [DAC_OVERRIDE]
+    cap_drop: [ALL]
+```
+
+That grants nothing the Docker socket had not already granted. **If you deploy
+with Komodo, add it before running `clixz fix` on a tree that still carries v1
+ACLs.**
 
 `clixz check` still *detects* leftover ACL entries from v1 and `clixz fix`
 clears them with `setfacl -b`.

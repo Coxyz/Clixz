@@ -74,6 +74,15 @@ Trois suppressions qui ne coûtent aucune sécurité :
 
 1. **ACL `boxyz_komodo` supprimée.** komodo-periphery tourne en uid 0 avec le
    socket Docker : il lit et écrit déjà tout, l'ACL est décorative.
+
+   > **Rectificatif du 2026-09-30 — cette affirmation était fausse.** Periphery
+   > tourne bien en uid 0, mais avec `cap_drop: ALL` : sans `CAP_DAC_OVERRIDE`,
+   > root est soumis aux modes comme n'importe quel compte. L'ACL était donc son
+   > seul accès aux `compose.yaml`, et `clixz fix` l'a coupé de toutes les
+   > stacks. Correction retenue : `cap_add: [DAC_OVERRIDE]` dans le compose de
+   > Periphery, qui ne lui donne rien que `docker.sock` ne lui donnait déjà. La
+   > suppression des ACL est maintenue ; le « ne coûte aucune sécurité »
+   > ci-dessus reste vrai, le « ne coûte rien » ne l'était pas.
 2. **ACL `boxyz_dev` supprimée.** Elle sert code-server, absent.
 3. **ACL `docker:r` sur `.env` remplacée par `root:docker 640`.** Effet identique,
    mécanisme ordinaire.

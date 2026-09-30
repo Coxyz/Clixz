@@ -1,141 +1,130 @@
 # À faire de ton côté — actions système
 
-Établi le 2026-08-29 à partir de l'audit de `/srv/docker` et des vérifications root.
-clixz v2 ne touche à rien de tout ceci : ce sont des gestes sur la machine,
-hors du dépôt.
+Établi le 2026-08-29 à partir de l'audit de `/srv/docker`, **remis à jour le
+2026-09-30** d'après l'état constaté sur la machine. clixz ne fait rien de tout
+ceci à ta place : ce sont des gestes sur l'hôte, hors du dépôt.
 
-Coche au fur et à mesure. Ordre = priorité décroissante.
+Ordre = priorité décroissante. Ce qui est fait est listé à la fin.
 
 ---
 
-## A. Fermer l'exposition Internet  — ✅ en grande partie fait
+## A. Sauvegardes — le risque le plus probable de l'audit
 
-État constaté à l'audit : 24 hôtes, 20 activés, `access_list_id = 0` partout.
-État au 2026-08-29 après ton passage : 15 hôtes, 7 activés, 9 supprimés.
-
-- [x] ~~Désactiver `esp.coxyz.fr`~~ (esphome privileged + host net, sur Internet)
-- [x] ~~Désactiver `mcp.coxyz.fr`~~ (Internet → token → démon root)
-- [x] ~~Supprimer les cibles mortes~~ `sftp`, `portainer`, `adguard`, `zircon`,
-      `server`, les doublons `ha.local`, le wildcard `*.coxyz.fr`→`web`
-- [ ] Supprimer `komodo.coxyz.fr`, `proxy.coxyz.fr`, `pihole.coxyz.fr`
-      → **étape 3c**, après avoir prouvé l'accès par le tailnet
-- [ ] Supprimer `code.coxyz.fr` et `grafana.coxyz.fr` (conteneurs inexistants ;
-      désactivés ne suffit pas — ils redeviennent vivants si un conteneur de ce
-      nom réapparaît)
-- [ ] Décider du sort de `aixyz.api.coxyz.fr` → 192.168.1.6 (désactivé pour
-      l'instant ; c'est une autre machine du LAN)
-- [ ] Réactiver `coxyz.fr` et `boxyz.api.coxyz.fr` si tu veux retrouver ton
-      dashboard public (désactivés pour l'instant)
-
-Reste activé : `atuin`, `cloud`, `vault`, `ha`, plus les 3 consoles à retirer.
-
-## B. Accès admin par le tailnet — en cours
-
-- [x] ~~Installer Tailscale sur l'hôte~~ — `100.113.235.49`, interface montée
-- [ ] Installer le client sur ton laptop et ton téléphone (même compte)
-- [ ] **Activer l'approbation manuelle des appareils** (`Settings → Device
-      approval`). Sans elle, un compte Tailscale compromis = accès immédiat au
-      réseau admin. Avec elle, l'appareil de l'attaquant reste en attente.
-- [ ] MFA sur le compte d'identité (Google/GitHub), pas seulement sur Tailscale
-- [ ] Décider pour Tailscale SSH (`RunSSH: true` actuellement) : le garder, ou
-      `sudo tailscale set --ssh=false`. Il court-circuite ton `sshd` durci
-      (port 4242, `AllowUsers opxyz`, clé uniquement) — deux portes au lieu d'une.
-- [ ] **Étape 3a** — vérifier `http://100.113.235.49:9120` depuis la 4G
-- [ ] **Étape 3b** — publier l'admin NPM : ajouter `"100.113.235.49:81:81"` aux
-      ports de `/srv/docker/network/npm/compose.yaml` (l. 21-23), redéployer,
-      vérifier `http://100.113.235.49:81` depuis la 4G
-- [ ] **Étape 3d** — restreindre Komodo : `"100.113.235.49:9120:9120"` dans
-      `/srv/docker/infra/komodo/compose.yaml` (l. 66), redéployer
-- [ ] Optionnel — subnet router : `sudo tailscale up
-      --advertise-routes=172.19.0.0/16,172.20.0.0/16,192.168.1.0/24` puis
-      approuver les routes. Donne accès à n'importe quel conteneur et au LAN
-      (donc pihole) sans publier un seul port.
-
-## C. Fermer l'exposition LAN
-
-Constaté : **`ufw` inactive** et **`DOCKER-USER` vide**. Aucun filtrage réseau.
-Tout port publié sur `0.0.0.0` est joignable par n'importe quel appareil du LAN.
-`ufw enable` ne suffirait pas : Docker insère ses règles en amont de ufw. Le bon
-geste est le binding dans le compose.
-
-- [ ] `komodo-core` : `9120` → `127.0.0.1:9120`
-- [ ] `esphome` : `6052` (network_mode host — nécessite de revoir le mode réseau)
-- [ ] `mosquitto` : `1883` → binding restreint, ou activer TLS
-- [ ] `docker swarm leave --force` (0 service déployé, ferme 2377/7946/4789)
-
-## D. Sauvegardes — le risque le plus probable de l'audit
-
-Aucun outil installé (`restic`, `borg`, `rclone`, `duplicity` absents), aucun timer.
-Bitwarden et 11 Go de Nextcloud n'ont **aucune** copie. Le seul dump existant est
-celui de Komodo, sur le même disque que ce qu'il sauvegarde.
+Aucun outil installé (`restic`, `borg` absents), aucun timer. Bitwarden et
+Nextcloud n'ont **aucune** copie hors de la machine.
 
 - [ ] Choisir un support externe (NAS, disque USB rotatif, stockage objet distant)
 - [ ] `restic` + timer systemd sur : `apps/bitwarden/data`,
-      `apps/nextcloud/data/files`, `automation/home-assistant/config`,
-      les 12 `.env`, `/etc/clixz`, `/srv/docs`
+      `apps/nextcloud/data/files`, `automation/home-assistant/config`, les `.env`,
+      `/etc/clixz`, `/srv/docs`
 - [ ] Tester une restauration (une sauvegarde non testée n'est pas une sauvegarde)
+
+## B. Mémoire du Pi
+
+Le 2026-09-30, une charge supplémentaire (des conteneurs de test lancés à côté
+de la production) a saturé les 4 Go et fait planter la machine — DNS du LAN
+compris, puisque Pi-hole tourne dessus.
+
+- [ ] Poser des `mem_limit` sur les services qui n'en ont pas (nextcloud et ses
+      deux bases, homeassistant, pihole, la pile komodo, npm, bitwarden)
+- [ ] Ne rien lancer de lourd sur cet hôte sans marge mesurée (`free -h`)
+
+## C. Durcissement des conteneurs
+
+Ce que `clixz check` montre encore, hors images non épinglées. Chaque point
+demande un essai sur le service réel, un à la fois, avec l'ancien compose prêt à
+être remis — une liste de `cap_add` incomplète empêche le conteneur de démarrer.
+
+- [ ] **`homeassistant` : retirer `privileged`.** Il reste publié sur Internet.
+      Il a déjà `/dev`, `NET_ADMIN`, `NET_RAW`, une IP macvlan et `/run/dbus`.
+      À vérifier après coup : Bluetooth, clés USB Zigbee/Z-Wave, découverte réseau.
+- [ ] `nextcloud`, `nextcloud-db`, `nextcloud-redis` : `cap_drop: ALL` +
+      `no-new-privileges`. Listes à essayer : nextcloud `CHOWN DAC_OVERRIDE FOWNER
+      SETGID SETUID NET_BIND_SERVICE` ; postgres `CHOWN DAC_OVERRIDE FOWNER SETGID
+      SETUID` ; redis `CHOWN SETGID SETUID`.
+- [ ] `komodo-postgres`, `komodo-ferretdb` : `cap_drop: ALL` (mêmes capacités
+      que postgres pour le premier)
+- [ ] `pihole` : `cap_drop: ALL` en gardant ses capacités réseau, et
+      `no-new-privileges` — à essayer hors des heures où le LAN a besoin du DNS
+- [ ] `esphome` : image figée à décembre 2024, à mettre à jour
+- [ ] `komodo-periphery` : évaluer `/proc` en lecture seule
+
+## D. Exposition
+
+`clixz exposed` fait foi. État au 2026-09-30 : 14 hôtes dans le reverse proxy,
+9 activés. `komodo`, `proxy` et `pihole` sont derrière la liste d'accès
+`tailscale-only`.
+
+- [ ] `mcp.coxyz.fr` et `playwright.coxyz.fr` sont publiés sans `url:` dans leur
+      `service.yaml` : les déclarer, ou les retirer du proxy
+- [ ] `code.coxyz.fr` et `grafana.coxyz.fr` sont déclarés dans un `service.yaml`
+      mais absents du proxy : retirer l'`url:` tant que ces services ne tournent pas
+- [ ] Supprimer les hôtes désactivés devenus inutiles (`esp`, `aixyz.api`,
+      `*.coxyz.fr`) : désactivé ne suffit pas, l'entrée redevient vivante le jour
+      où on la réactive par mégarde
+- [ ] `mosquitto` : `1883` est publié sur toutes les interfaces, en clair
+      (accepté dans `ignore.yaml`) — envisager TLS
+- [ ] `docker swarm leave --force` : Swarm est toujours actif, 0 service, et
+      ouvre 2377/7946/4789
 
 ## E. Supervision
 
-- [ ] Redémarrer `prometheus` et `node-exporter` (exited depuis 26 h, exit 2)
-- [ ] Réparer `mosquitto` (unhealthy)
-- [ ] **Retirer le montage `/`→`/rootfs` de `node-exporter`** : en root il lit les
-      12 `.env` et `/etc/shadow`, ce qui annule la protection des secrets
-- [ ] Mettre une alerte sur l'absence de métriques (une supervision qui ne s'alerte
-      pas de sa propre panne ne couvre rien)
+`prometheus`, `node-exporter` et `grafana` ne tournent plus du tout : il n'y a
+aucune supervision, et c'est ainsi que le plantage du 2026-09-30 n'a été vu que
+par ses effets.
 
-## F. Durcissement des conteneurs
+- [ ] Redéployer `monitoring/prometheus` (le compose ne monte plus `/`) et
+      `monitoring/grafana`
+- [ ] Mettre une alerte sur l'absence de métriques et sur la mémoire disponible
 
-- [ ] `nextcloud`, `nextcloud-db`, `nextcloud-redis` : root, sans `cap_drop`, sans
-      `no-new-privileges`. Le service le plus exposé et le moins protégé.
-- [ ] `pihole` : root, aucun `security_opt`, `SYS_TIME`
-- [ ] **`homeassistant` : retirer `privileged`** — priorité haute puisqu'il reste
-      publié sur Internet. Il a déjà `/dev`, `NET_ADMIN`, `NET_RAW`, une IP macvlan
-      et `/run/dbus`. Tester : Bluetooth, clés USB Zigbee/Z-Wave, découverte réseau.
-- [ ] `esphome` : mettre à jour l'image (figée à décembre 2024)
-- [ ] `komodo-periphery` : retirer `/proc` rw, restreindre le montage `/srv/docker` rw
+## F. Comptes système
 
-## G. Comptes système
+Plus aucune ACL n'utilise ces comptes depuis clixz 2.0.
 
-- [ ] Retirer opxyz des groupes de service (il est dans `docker`, donc root sans mot
-      de passe : ces appartenances n'ouvrent rien de neuf) :
-      `sudo gpasswd -d opxyz svc_apps svc_automation svc_infra svc_monitoring svc_network`
-      (une commande par groupe)
-- [ ] `sudo gpasswd -d opxyz boxyz_dev`
-- [ ] Supprimer le compte `boxyz_dev` et le groupe `boxyz_komodo` **une fois clixz v2
-      déployé** (plus aucune ACL ne les utilise)
-- [ ] Supprimer le compte `svc_mcprun`… non : il reste, `clixz-mcpd` tourne dessus.
+- [ ] Retirer `opxyz` des groupes de service (il est dans `docker`, donc root
+      sans mot de passe : ces appartenances n'ouvrent rien de neuf) —
+      `sudo gpasswd -d opxyz <groupe>` pour `svc_apps`, `svc_automation`,
+      `svc_infra`, `svc_monitoring`, `svc_network`, `boxyz_dev`
+- [ ] `/opt/images` et `/opt/repos` appartiennent à `boxyz_dev` : changer leur
+      propriétaire **avant** de supprimer ce compte
+- [ ] Supprimer le compte `boxyz_dev` et le groupe `boxyz_komodo`, puis la ligne
+      `group_add: "1005"` des compose `komodo` et `komodo-periphery`
 
-## H. Déploiement de clixz v2 (quand la branche sera prête)
+## G. Accès admin par le tailnet
 
-- [ ] Relire la branche `v2-refonte`
-- [ ] Installer la nouvelle `/etc/clixz/config.yaml` (format changé — `clixz config --migrate`)
-- [ ] `sudo systemctl disable --now clixz-admind.socket clixz-admind.service clixz-runnerd`
-- [ ] Installer et activer `clixz-mcpd.service`
-- [ ] Supprimer `/etc/clixz/elevated.yaml` (sans objet sans génération de compose)
-- [ ] Reconstruire et redéployer l'image `mcp-coxyz`
-      (le code dans `/opt/images/mcp-coxyz/app/` est **déjà adapté** : socket
-      `clixz-mcpd`, `service_apply` supprimé, `service_exposed` ajouté — il ne
-      reste qu'à builder)
-- [ ] `sudo clixz check` puis `sudo clixz fix`
+- [ ] Activer l'approbation manuelle des appareils (`Settings → Device approval`)
+- [ ] MFA sur le compte d'identité, pas seulement sur Tailscale
+- [ ] Décider pour Tailscale SSH : il court-circuite le `sshd` durci (port 4242,
+      clé uniquement) — deux portes au lieu d'une
 
-## I. Rangement
+## H. Rangement
 
-- [ ] Déplacer `/home/opxyz/komodo-docker-config` (credentials de registry de
-      komodo-periphery) vers `/srv/docker/infra/komodo-periphery/config/docker/`
-- [x] ~~`/srv/docs/config/compose.yaml` en 0775~~ — passé en 0644, et son contenu
-      remplacé par la sortie réelle de `clixz new`
-- [ ] Épingler les 9 images en `:latest` sur une version
-- [ ] `birdnet-pi` : le compose pointe vers un dossier inexistant, le service n'a
-      jamais démarré → réparer ou archiver
-- [ ] `/srv/docker/network/npm/data/{app,letsencrypt}` en `root:root` : seuls chemins
-      de service hors du modèle `svc_*` → régulariser ou documenter comme exception
-- [ ] Réexaminer les deux `exclude:` sur `infra/komodo*/config`
+- [ ] Épingler les images en `:latest` ou sans tag (`clixz check` les liste)
+- [ ] `birdnet` : le service n'a jamais démarré → le déployer ou `sudo clixz rm`
+- [ ] `/home/opxyz/komodo-docker-config` (identifiants de registry de Periphery)
+      → `/srv/docker/infra/komodo-periphery/config/docker/`
+- [ ] `/srv/docker/network/npm/data/{app,letsencrypt}` en `root:root` : seuls
+      chemins de service hors du modèle `svc_*` → régulariser ou documenter
 - [ ] `/srv/docker/.archive` (0700) croît sans surveillance → purge ou rotation
-- [x] ~~Corriger `hardening-boxyz.md`~~ — fait, avec les deux autres dérives
-      trouvées au passage (chemin de Lynis `/srv/lynis` inexistant, et
-      « n'expose que NPM en 80/443 » qui était faux). Tout `/srv/docs` a été
-      réécrit ; **ce n'est pas versionné**, `/srv/docs` n'est pas un dépôt git.
-- [ ] Envisager de mettre `/srv/docs` sous git — trois affirmations avaient
-      dérivé sans que rien ne le signale
-- [x] ~~`rm -rf /opt/repos/clixz/build`~~ — fait
+- [ ] Mettre `/srv/docs` sous git : ces documents ont déjà dérivé plusieurs fois
+      sans que rien ne le signale
+- [ ] Les tags git `v0.2.0` à `v1.2.1` pointent sur l'historique d'avant la
+      réécriture du 2026-09-30 → les déplacer ou les supprimer
+
+---
+
+## Fait
+
+- clixz 2.x déployé : `clixz-admind` et `clixz-runnerd` retirés, `clixz-mcpd`
+  actif, config migrée, ACL de la v1 effacées par `clixz fix`, image `mcp-coxyz`
+  reconstruite, `elevated.yaml` supprimé
+- `manifest.json` et `npm-hosts.json` dans `/etc/clixz`, rafraîchis par
+  `clixz-snapshot.timer`
+- Komodo Periphery et Core : `cap_add: [DAC_OVERRIDE]` à la place de l'ACL
+  `boxyz_komodo` (voir le rectificatif dans `REFONTE.md` §3)
+- Consoles `komodo`, `proxy`, `pihole` derrière Tailscale + liste d'accès NPM ;
+  admin NPM sur `127.0.0.1:8181` ; port 9120 de Komodo plus publié sur l'hôte
+- Hôtes morts du proxy supprimés (`sftp`, `portainer`, `adguard`, `zircon`,
+  `server`, doublons `ha.local`)
+- Tailscale installé sur l'hôte
+- `/srv/docs` réécrit et tenu à jour avec clixz 2.2

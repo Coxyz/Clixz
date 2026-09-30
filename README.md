@@ -31,7 +31,7 @@ So 2.0 moves the effort:
 | Seven path rules + a POSIX ACL engine | Three rules, no ACLs at all |
 | `clixz-runnerd` + `clixz-admind` (root, CAP_DAC_OVERRIDE) | one unprivileged `clixz-mcpd` that cannot write |
 | Nothing looked at the reverse proxy | `clixz exposed` cross-checks it |
-| 6 126 lines | ~2 700 lines |
+| 6 126 lines | ~2 900 lines at 2.0 (~4 100 at 2.2, with rules, repos and categories) |
 
 `docs/REFONTE.md` records the reasoning and the decisions; `docs/TODO-OPXYZ.md`
 lists the host-side actions the audit produced.
@@ -188,9 +188,11 @@ belongs, Periphery's own compose:
     cap_drop: [ALL]
 ```
 
-That grants nothing the Docker socket had not already granted. **If you deploy
-with Komodo, add it before running `clixz fix` on a tree that still carries v1
-ACLs.**
+That grants nothing the Docker socket had not already granted. Komodo Core is in
+the same position for its own `/config`. **If you deploy with Komodo, add the
+capability to both before running `clixz fix` on a tree that still carries v1
+ACLs** — a container keeps working until its next restart, so the breakage shows
+up later and looks unrelated.
 
 `clixz check` still *detects* leftover ACL entries from v1 and `clixz fix`
 clears them with `setfacl -b`.

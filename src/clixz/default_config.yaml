@@ -1,9 +1,10 @@
 # clixz configuration — default. Override at /etc/clixz/config.yaml.
 #
 # v2 enforces ownership and modes, and nothing else. There are no ACL
-# principals: Komodo Periphery runs as root and already reads everything, and
-# code-server (the other ACL consumer) is not deployed. `clixz config --migrate`
-# translates a v1 config into this shape.
+# principals. Komodo Periphery, which used one to read the compose files, needs
+# `cap_add: [DAC_OVERRIDE]` in its own compose instead (it runs as root, but
+# with cap_drop: ALL); code-server, the other consumer, is not deployed.
+# `clixz config --migrate` translates a v1 config into this shape.
 
 root_dir: /srv/docker
 

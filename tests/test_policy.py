@@ -152,6 +152,30 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotIn("other", [s for _, s, _ in list_services(config)])
 
 
+    def test_an_excluded_path_inside_a_service_is_neither_audited_nor_fixed(self) -> None:
+        svc = self.root / "apps" / "demo"
+        (svc / "config").chmod(0o700)
+        config = parse_config({
+            "root_dir": str(self.root),
+            "categories": {"apps": {"user": "root", "group": "root"}},
+            "exclude": [str(svc / "config")],
+        })
+        report = audit_service(config, "apps", "demo")
+        self.assertNotIn(svc / "config", [f.path for f in report.findings])
+        self.assertFalse(any(str(svc / "config") in fix for fix in report.fixes))
+        # The rest of the service is still audited.
+        self.assertIn(svc / "data", [f.path for f in report.findings])
+
+    def test_exclusion_stops_at_a_path_boundary(self) -> None:
+        config = parse_config({
+            "root_dir": str(self.root),
+            "categories": {"apps": {"user": "root", "group": "root"}},
+            "exclude": [str(self.root / "apps" / "komodo")],
+        })
+        self.assertTrue(is_excluded(config, self.root / "apps" / "komodo" / "config"))
+        self.assertFalse(is_excluded(config, self.root / "apps" / "komodo-periphery"))
+
+
 class OrderingTests(unittest.TestCase):
     def test_mkdir_before_chown_before_chmod(self) -> None:
         ordered = order_fixes([

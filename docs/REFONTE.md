@@ -353,3 +353,27 @@ Deux bugs réels trouvés par les tests pendant l'écriture :
    ne faisant jamais de `chmod` sur un chemin ACL ; v2 retire les ACL d'abord.
 
 Reste à faire côté humain : `docs/TODO-OPXYZ.md`.
+
+## 12. Depuis la 2.0 (état au 2026-09-30)
+
+Ce document est le plan d'origine ; il n'est plus tenu à jour ligne à ligne. Ce
+qui a changé depuis, et qui contredit ou complète ce qui précède :
+
+- **2.1** — `clixz upgrade` : sur cet hôte (`UMASK 027`), un `sudo pipx upgrade`
+  laissait l'environnement illisible hors root.
+- **2.2** — les règles de compose ne sont plus des constantes : `lint.yaml`
+  (niveau par règle) et `ignore.yaml` (écarts acceptés, raison obligatoire), à
+  côté de `config.yaml`. `clixz repo`, `clixz category add`, `clixz mcp`.
+  `manifest.json` quitte `apps/api/data` pour `/etc/clixz`. `clixz exposed`
+  devient accessible au MCP par une copie que root rafraîchit
+  (`npm-hosts.json`), le démon restant non privilégié. Le §2 annonçait 10
+  commandes ; il y en a davantage, rangées en cinq groupes dans `clixz --help`.
+- **Rectificatif Komodo** (§3) : Periphery et Core ne lisaient l'arborescence
+  que grâce à l'ACL ; elle est remplacée par `cap_add: [DAC_OVERRIDE]`.
+- **`exclude`** ne protégeait que des services entiers : un chemin exclu à
+  l'intérieur d'un service était quand même corrigé par `clixz fix`. Corrigé en
+  2.2.1.
+- **Publication** : PyPI est alimenté par une release GitHub, plus par un tag
+  seul.
+
+Les phases 0, 2 et 3 du §6 sont suivies dans `docs/TODO-OPXYZ.md`.

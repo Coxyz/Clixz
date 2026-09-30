@@ -75,11 +75,17 @@ class ServiceReport:
 # ─── discovery ───────────────────────────────────────────────────────────────
 
 def is_excluded(config: Config, path: Path) -> bool:
+    """True when ``path`` matches an ``exclude`` pattern or sits under one.
+
+    "Under" is tested on a path boundary: excluding ``infra/komodo`` must not
+    also exclude ``infra/komodo-periphery``.
+    """
     text = str(path)
-    return any(
-        fnmatch.fnmatch(text, pattern) or text.startswith(pattern.rstrip("*/"))
-        for pattern in config.exclude
-    )
+    for pattern in config.exclude:
+        prefix = pattern.rstrip("*/")
+        if fnmatch.fnmatch(text, pattern) or text == prefix or text.startswith(prefix + "/"):
+            return True
+    return False
 
 
 def list_categories(config: Config) -> list[str]:
@@ -200,12 +206,18 @@ def audit_service(config: Config, category: str, service: str) -> ServiceReport:
     report = ServiceReport(category=category, service=service, path=svc_path)
     owner = config.category(category).owner
 
-    report.findings += _audit_path(svc_path, "dir", owner, config, is_dir=True)
-    for name in SERVICE_DIRS:
-        report.findings += _audit_path(svc_path / name, "dir", owner, config, is_dir=True)
-    report.findings += _audit_path(svc_path / COMPOSE, "file", owner, config, is_dir=False)
-    report.findings += _audit_path(svc_path / SERVICE_FILE, "file", owner, config, is_dir=False)
-    report.findings += _audit_path(svc_path / ENV_FILE, "env", owner, config, is_dir=False)
+    skeleton = [(svc_path, "dir", True)]
+    skeleton += [(svc_path / name, "dir", True) for name in SERVICE_DIRS]
+    skeleton += [(svc_path / COMPOSE, "file", False), (svc_path / SERVICE_FILE, "file", False),
+                 (svc_path / ENV_FILE, "env", False)]
+    for path, rule, is_dir in skeleton:
+        # An excluded path is excluded from the audit *and* from the repair.
+        # Until 2.2.1 only whole services were: `exclude: [infra/komodo/config]`
+        # still had that directory chowned, chmodded and stripped of its ACL by
+        # `clixz fix`, which locked Komodo Core out of its own keys.
+        if is_excluded(config, path):
+            continue
+        report.findings += _audit_path(path, rule, owner, config, is_dir=is_dir)
     return _apply_ignores(config, report)
 
 

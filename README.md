@@ -83,6 +83,7 @@ clixz repo add|rm|ls <name>     # git checkouts under /opt/repos (add --url clon
 clixz category ls
 clixz rules --edit | --edit-ignore
 clixz config [--migrate] [--edit]
+clixz mcp                       # what the MCP gateway can run and read
 clixz upgrade [--plan]          # upgrade clixz itself, world-readable
 ```
 

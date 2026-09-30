@@ -1,8 +1,9 @@
 """clixz command line.
 
-Verbs in three groups: read (``ls``, ``show``, ``check``, ``exposed``,
-``rules``), write (``new``, ``fix``, ``rm``, ``category add``), and housekeeping
-(``meta``, ``manifest``, ``image``, ``repo``, ``config``, ``upgrade``).
+Verbs in five groups, which are also the panels of ``clixz --help``: inspect
+(``ls``, ``show``, ``check``, ``exposed``, ``rules``), change (``new``, ``fix``,
+``rm``, ``category``), publish (``meta``, ``manifest``), development (``image``,
+``repo``), and clixz itself (``config``, ``mcp``, ``upgrade``).
 
 Every write verb accepts ``--plan``: it prints the commands it would run, as
 JSON when asked, and writes nothing. That flag is what lets ``clixz-mcpd``
@@ -27,6 +28,7 @@ from rich.table import Table
 
 from . import __version__
 from . import compose as compose_mod
+from . import mcpd as mcpd_mod
 from . import npm as npm_mod
 from . import repo as repo_mod
 from . import rules as rules_mod
@@ -71,12 +73,21 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=True,
 )
-image_app = typer.Typer(help="Self-built image build contexts under /opt/images.")
-app.add_typer(image_app, name="image")
-repo_app = typer.Typer(help="Git checkouts under /opt/repos.")
-app.add_typer(repo_app, name="repo")
-category_app = typer.Typer(help="Categories: a system account, a directory, a config entry.")
-app.add_typer(category_app, name="category")
+# The panels of `clixz --help`, in the order a command is declared in.
+INSPECT = "Inspect — read-only"
+CHANGE = "Change — need root, accept --plan"
+PUBLISH = "Publish — service descriptors"
+DEVELOP = "Development directories"
+ITSELF = "clixz itself"
+
+image_app = typer.Typer(help="Self-built image build contexts under /opt/images.",
+                        no_args_is_help=True)
+app.add_typer(image_app, name="image", rich_help_panel=DEVELOP)
+repo_app = typer.Typer(help="Git checkouts under /opt/repos.", no_args_is_help=True)
+app.add_typer(repo_app, name="repo", rich_help_panel=DEVELOP)
+category_app = typer.Typer(help="Categories: a system account, a directory, a config entry.",
+                           no_args_is_help=True)
+app.add_typer(category_app, name="category", rich_help_panel=CHANGE)
 
 console = Console()
 err = Console(stderr=True)
@@ -187,7 +198,7 @@ def main(
 
 # ─── read ────────────────────────────────────────────────────────────────────
 
-@app.command("ls")
+@app.command("ls", rich_help_panel=INSPECT)
 def ls_cmd(
     category: Annotated[Optional[str], typer.Option("--category", "-C")] = None,
     archived: Annotated[bool, typer.Option("--archived", help="List archived services instead.")] = False,
@@ -238,7 +249,7 @@ def ls_cmd(
     console.print(f"\n[dim]{len(rows)} service(s).[/dim]")
 
 
-@app.command("show")
+@app.command("show", rich_help_panel=INSPECT)
 def show_cmd(
     service: Annotated[str, typer.Argument(autocompletion=_complete_service)],
     json_out: Annotated[bool, typer.Option("--json")] = False,
@@ -311,7 +322,7 @@ def _print_finding(finding: Finding, indent: str = "  ") -> None:
     )
 
 
-@app.command("check")
+@app.command("check", rich_help_panel=INSPECT)
 def check_cmd(
     service: Annotated[Optional[str], typer.Argument(autocompletion=_complete_service)] = None,
     category: Annotated[Optional[str], typer.Option("--category", "-C")] = None,
@@ -421,7 +432,7 @@ def check_cmd(
     raise typer.Exit(code=1 if (errors or raw_issues) else 0)
 
 
-@app.command("exposed")
+@app.command("exposed", rich_help_panel=INSPECT)
 def exposed_cmd(
     snapshot: Annotated[bool, typer.Option(
         "--snapshot", help="As root: copy the proxy hosts to a file anyone may read.")] = False,
@@ -517,7 +528,7 @@ def exposed_cmd(
     )
 
 
-@app.command("rules")
+@app.command("rules", rich_help_panel=INSPECT)
 def rules_cmd(
     edit: Annotated[bool, typer.Option(
         "--edit", help="Open lint.yaml in $EDITOR (created from the defaults).")] = False,
@@ -612,7 +623,7 @@ def _render_plan(commands: list[list[str]], *, json_out: bool, action: str,
     console.print(f"\n[dim]{len(commands)} command(s). Nothing written.[/dim]")
 
 
-@app.command("new")
+@app.command("new", rich_help_panel=CHANGE)
 def new_cmd(
     service: Annotated[str, typer.Argument(help="category/service")],
     plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
@@ -656,7 +667,7 @@ def new_cmd(
                   f"then `clixz check {service}`.")
 
 
-@app.command("fix")
+@app.command("fix", rich_help_panel=CHANGE)
 def fix_cmd(
     service: Annotated[Optional[str], typer.Argument(autocompletion=_complete_service)] = None,
     category: Annotated[Optional[str], typer.Option("--category", "-C")] = None,
@@ -704,7 +715,7 @@ def fix_cmd(
         raise typer.Exit(code=1)
 
 
-@app.command("rm")
+@app.command("rm", rich_help_panel=CHANGE)
 def rm_cmd(
     service: Annotated[str, typer.Argument(autocompletion=_complete_service)],
     plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
@@ -751,7 +762,7 @@ def rm_cmd(
 
 # ─── housekeeping ────────────────────────────────────────────────────────────
 
-@app.command("meta")
+@app.command("meta", rich_help_panel=PUBLISH)
 def meta_cmd(
     service: Annotated[Optional[str], typer.Argument(autocompletion=_complete_service)] = None,
     scaffold: Annotated[bool, typer.Option(
@@ -792,7 +803,7 @@ def meta_cmd(
     raise typer.Exit(code=1 if result.errors else 0)
 
 
-@app.command("manifest")
+@app.command("manifest", rich_help_panel=PUBLISH)
 def manifest_cmd(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate and preview only.")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
@@ -1036,7 +1047,7 @@ def category_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -
     console.print(table)
 
 
-@app.command("config")
+@app.command("config", rich_help_panel=ITSELF)
 def config_cmd(
     edit: Annotated[bool, typer.Option("--edit", help="Open the config in $EDITOR.")] = False,
     migrate: Annotated[bool, typer.Option(
@@ -1120,7 +1131,96 @@ def config_cmd(
         console.print("[dim]Run `clixz config --migrate` for a v2 translation.[/dim]")
 
 
-@app.command("upgrade")
+MCPD_UNIT = Path("/etc/systemd/system/clixz-mcpd.service")
+
+# What stays out of reach whatever the caller sends. Not derived from code: it
+# is the list of things a reader would otherwise have to infer from an absence.
+MCP_NEVER = (
+    "applying a plan — new, fix, rm, category add and repo add/rm only ever run with --plan",
+    "rm --force, the one destructive path, which refuses --plan and --json",
+    "writing anything: manifest is a dry run, exposed reads the snapshot root wrote",
+    "config --edit, rules --edit, meta --scaffold, image add/rm, upgrade",
+    "the contents of .env files (root-owned, outside the daemon's groups)",
+)
+
+
+def _unit_setting(text: str, key: str) -> list[str]:
+    values: list[str] = []
+    for line in text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            values += value.split()
+    return values
+
+
+@app.command("mcp", rich_help_panel=ITSELF)
+def mcp_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """What the MCP gateway (clixz-mcpd) can run and read, and what it cannot."""
+    payload: dict[str, Any] = mcpd_mod.access()
+    payload["never"] = list(MCP_NEVER)
+    socket_path = Path(payload["socket"])
+    # The runtime directory is 0750: from another account "absent" and "not
+    # allowed to look" are the same stat() failure, and only one of them is news.
+    payload["socket_present"] = (
+        socket_path.exists() if os.access(socket_path.parent, os.X_OK) else None)
+
+    try:
+        unit = MCPD_UNIT.read_text(encoding="utf-8")
+    except OSError:
+        unit = None
+    payload["unit"] = str(MCPD_UNIT) if unit is not None else None
+    account = (_unit_setting(unit, "User") or [None])[0] if unit is not None else None
+    groups = set(_unit_setting(unit, "SupplementaryGroups")) if unit is not None else set()
+    if account:
+        groups.add(account)
+    payload["account"] = account
+    # A category is readable when the daemon carries its group: every
+    # directory of the tree is owner+group only.
+    payload["categories"] = [
+        {"name": name, "group": cat.group,
+         "readable": (cat.group in groups) if unit is not None else None}
+        for name, cat in sorted(ctx.config.categories.items())
+    ]
+    if json_out:
+        return emit(payload)
+
+    state = {True: "[green]present[/green]", False: "[red]absent[/red]",
+             None: "[dim]not visible from this account — try with sudo[/dim]"}[
+                 payload["socket_present"]]
+    console.print(f"[bold]Socket[/bold]   {payload['socket']}  {state}")
+    unit_label = payload["unit"] or "[red]not installed[/red]"
+    console.print(f"[bold]Unit[/bold]     {unit_label}")
+    console.print(f"[bold]Account[/bold]  {account or '[dim]unknown[/dim]'}")
+
+    for title, key in (("Reads — run as they are", "read"),
+                       ("Mutations — planned, never applied", "plan")):
+        table = Table(box=None, pad_edge=False, title=title, title_justify="left")
+        table.add_column("REQUEST")
+        table.add_column("RUNS")
+        for row in payload[key]:
+            table.add_row(row["request"], escape(row["runs"]))
+        console.print()
+        console.print(table)
+
+    table = Table(box=None, pad_edge=False, title="Tree it can read", title_justify="left")
+    for column in ("CATEGORY", "GROUP", "READABLE"):
+        table.add_column(column)
+    for row in payload["categories"]:
+        readable = {True: "[green]yes[/green]", False: "[red]no — not in the unit's groups[/red]",
+                    None: "[dim]unknown[/dim]"}[row["readable"]]
+        table.add_row(row["name"], row["group"], readable)
+    console.print()
+    console.print(table)
+
+    console.print()
+    console.print("[bold]Never reachable[/bold]")
+    for line in MCP_NEVER:
+        console.print(f"  • {escape(line)}")
+    console.print("\n[dim]The tools the MCP server builds on these requests are defined "
+                  "in its own image, not here.[/dim]")
+
+
+@app.command("upgrade", rich_help_panel=ITSELF)
 def upgrade_cmd(
     plan: Annotated[bool, typer.Option(
         "--plan", help="Print the command that would run, and run nothing.")] = False,

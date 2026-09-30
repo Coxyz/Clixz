@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import unittest
 
-from clixz.mcpd import PLAN_ACTIONS, READ_COMMANDS, RequestError, build_argv, handle
+from clixz.mcpd import (
+    NAMED_PLAN_ACTIONS,
+    PLAN_ACTIONS,
+    READ_COMMANDS,
+    RequestError,
+    access,
+    build_argv,
+    handle,
+)
 
 
 class ReadTests(unittest.TestCase):
@@ -88,6 +96,18 @@ class NamedPlanTests(unittest.TestCase):
         for request in bad:
             with self.assertRaises(RequestError, msg=request):
                 build_argv({"cmd": "plan", **request})
+
+
+class AccessTests(unittest.TestCase):
+    def test_every_verb_the_daemon_accepts_is_listed(self) -> None:
+        listed = access()
+        self.assertEqual(list(READ_COMMANDS), [r["request"] for r in listed["read"]])
+        self.assertEqual([*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS],
+                         [r["request"] for r in listed["plan"]])
+
+    def test_every_listed_mutation_is_a_plan(self) -> None:
+        for row in access()["plan"]:
+            self.assertIn("--plan", row["runs"], row)
 
 
 class ValidationTests(unittest.TestCase):

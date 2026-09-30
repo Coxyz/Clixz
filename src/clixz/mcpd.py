@@ -159,6 +159,36 @@ def build_argv(req: dict) -> list[str]:
     )
 
 
+def access() -> dict:
+    """What a caller on the socket can ask for, as the commands it turns into.
+
+    Built by running :func:`build_argv` on a sample of each request rather than
+    written out by hand, so `clixz mcp` cannot drift from what the daemon does.
+    """
+    options = {"check": "[service] [--verbose]", "ls": "[--category <category>]"}
+    samples = {"show": {"service": "category/service"}}
+    read = []
+    for cmd in READ_COMMANDS:
+        argv = build_argv({"cmd": cmd, **samples.get(cmd, {})})[1:]
+        read.append({"request": cmd,
+                     "runs": " ".join(["clixz", *argv, options.get(cmd, "")]).strip()})
+
+    plan_samples = {
+        "new": {"service": "category/service"}, "fix": {},
+        "rm": {"service": "category/service"},
+        "category-add": {"name": "name"}, "repo-add": {"name": "name"},
+        "repo-rm": {"name": "name"},
+    }
+    plan_options = {"fix": "[service]", "category-add": "[--account <account>]",
+                    "repo-add": "[--url <url>]"}
+    plan = []
+    for action in (*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS):
+        argv = build_argv({"cmd": "plan", "action": action, **plan_samples[action]})[1:]
+        plan.append({"request": action,
+                     "runs": " ".join(["clixz", *argv, plan_options.get(action, "")]).strip()})
+    return {"socket": SOCKET_PATH, "read": read, "plan": plan}
+
+
 def run(argv: list[str]) -> dict:
     try:
         proc = subprocess.run(

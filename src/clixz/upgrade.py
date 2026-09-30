@@ -8,13 +8,19 @@ unprivileged — dies on "permission denied". System packages do not have the
 problem because dpkg applies the modes recorded in the archive; a Python
 installer has nothing recorded to apply.
 
-So the upgrade goes through here, which sets the umask and hands over to the
-installer. One command to remember instead of a wrapper script to forget.
+So the upgrade goes through here, which sets the umask and runs the installer.
+One command to remember instead of a wrapper script to forget.
+
+It also restarts ``clixz-mcpd`` when the version changed. The daemon is a
+long-running Python process: it keeps serving the code it imported at start,
+and an upgrade that leaves it running has upgraded the CLI and not the gateway.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,3 +64,35 @@ def plan_upgrade(prefix: Path, launcher: Path | None = None,
 
 def needs_root(prefix: Path) -> bool:
     return not os.access(prefix, os.W_OK)
+
+
+MCPD_UNIT = "clixz-mcpd.service"
+# try-restart, not restart: a daemon the operator stopped stays stopped.
+RESTART_MCPD = ["systemctl", "try-restart", MCPD_UNIT]
+
+
+def installed_version(python: str) -> str | None:
+    """The version now on disk, asked of a fresh interpreter.
+
+    This process imported the old code before the installer replaced it, so its
+    own ``__version__`` cannot tell whether anything changed.
+    """
+    try:
+        done = subprocess.run(
+            [python, "-c", "import clixz; print(clixz.__version__)"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() or None
+
+
+def mcpd_running() -> bool:
+    """True when the gateway is up — and therefore still running the old code."""
+    if shutil.which("systemctl") is None:
+        return False
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", MCPD_UNIT],
+                              timeout=15, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False

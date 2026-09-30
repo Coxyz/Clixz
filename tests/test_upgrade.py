@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from clixz.upgrade import needs_root, plan_upgrade
+from clixz.upgrade import RESTART_MCPD, installed_version, needs_root, plan_upgrade
 
 
 class PlanUpgradeTests(unittest.TestCase):
@@ -57,6 +57,22 @@ class PlanUpgradeTests(unittest.TestCase):
 
     def test_a_writable_install_does_not_need_root(self) -> None:
         self.assertFalse(needs_root(self.root))
+
+
+class AfterUpgradeTests(unittest.TestCase):
+    def test_the_version_is_asked_of_a_fresh_interpreter(self) -> None:
+        import sys
+
+        import clixz
+        # PYTHONPATH reaches the child, so it imports the same source tree.
+        self.assertEqual(clixz.__version__, installed_version(sys.executable))
+
+    def test_an_interpreter_that_cannot_answer_is_not_a_crash(self) -> None:
+        self.assertIsNone(installed_version("/nonexistent/python"))
+
+    def test_a_stopped_daemon_is_never_started(self) -> None:
+        self.assertIn("try-restart", RESTART_MCPD)
+        self.assertNotIn("restart", [a for a in RESTART_MCPD if a != "try-restart"])
 
 
 if __name__ == "__main__":

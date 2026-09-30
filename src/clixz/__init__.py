@@ -1,3 +1,3 @@
 """clixz — CLI to manage Docker services under /srv/docker."""
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"

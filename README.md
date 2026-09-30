@@ -50,7 +50,9 @@ The `umask` matters on a hardened host: with `UMASK 027` in `/etc/login.defs`,
 pipx and uv create an environment only root can read, and `clixz` then fails
 with "permission denied" for everyone else — including `clixz-mcpd`.
 `clixz upgrade` sets it for you and calls the installer that put clixz there
-(pipx or uv), so there is nothing to remember after the first install.
+(pipx or uv), so there is nothing to remember after the first install. When the
+version changed it also restarts `clixz-mcpd`, which would otherwise keep
+serving the code it loaded at start.
 
 Write commands re-exec themselves through `sudo` automatically — set
 `CLIXZ_NO_SUDO=1` to opt out (containers, CI, and `clixz-mcpd`, which must never

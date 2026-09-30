@@ -65,7 +65,15 @@ from .policy import (
 )
 from .scaffold import CreateRequest, create_service, plan_create
 from .system import CommandExecutionError, missing_bins
-from .upgrade import UMASK, needs_root, plan_upgrade
+from .upgrade import (
+    MCPD_UNIT,
+    RESTART_MCPD,
+    UMASK,
+    installed_version,
+    mcpd_running,
+    needs_root,
+    plan_upgrade,
+)
 
 app = typer.Typer(
     name="clixz",
@@ -1138,7 +1146,7 @@ def config_cmd(
         console.print("[dim]Run `clixz config --migrate` for a v2 translation.[/dim]")
 
 
-MCPD_UNIT = Path("/etc/systemd/system/clixz-mcpd.service")
+MCPD_UNIT_FILE = Path("/etc/systemd/system/clixz-mcpd.service")
 
 # What stays out of reach whatever the caller sends. Not derived from code: it
 # is the list of things a reader would otherwise have to infer from an absence.
@@ -1172,10 +1180,10 @@ def mcp_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
         socket_path.exists() if os.access(socket_path.parent, os.X_OK) else None)
 
     try:
-        unit = MCPD_UNIT.read_text(encoding="utf-8")
+        unit = MCPD_UNIT_FILE.read_text(encoding="utf-8")
     except OSError:
         unit = None
-    payload["unit"] = str(MCPD_UNIT) if unit is not None else None
+    payload["unit"] = str(MCPD_UNIT_FILE) if unit is not None else None
     account = (_unit_setting(unit, "User") or [None])[0] if unit is not None else None
     groups = set(_unit_setting(unit, "SupplementaryGroups")) if unit is not None else set()
     if account:
@@ -1242,8 +1250,10 @@ def upgrade_cmd(
         raise typer.Exit(code=2)
     if plan:
         assignments = [f"{key}={value}" for key, value in upgrade.env.items()]
-        return _render_plan([[*assignments, *upgrade.argv]], json_out=json_out,
-                            action="upgrade", target=str(prefix))
+        commands = [[*assignments, *upgrade.argv]]
+        if mcpd_running():
+            commands.append([*RESTART_MCPD, "# only if the version changed"])
+        return _render_plan(commands, json_out=json_out, action="upgrade", target=str(prefix))
     if shutil.which(upgrade.argv[0]) is None:
         err.print(f"[red]ERROR[/red] {upgrade.argv[0]} installed clixz but was not found on PATH.")
         raise typer.Exit(code=2)
@@ -1252,10 +1262,30 @@ def upgrade_cmd(
     # The whole point of this command: see upgrade.py.
     os.umask(UMASK)
     try:
-        os.execvpe(upgrade.argv[0], upgrade.argv, {**os.environ, **upgrade.env})
+        done = subprocess.run(upgrade.argv, env={**os.environ, **upgrade.env}, check=False)
     except OSError as exc:  # pragma: no cover
         err.print(f"[red]ERROR[/red] {upgrade.argv[0]} failed: {exc}")
         raise typer.Exit(code=2)
+    if done.returncode != 0:
+        raise typer.Exit(code=done.returncode)
+
+    after = installed_version(sys.executable)
+    if after is None or after == __version__:
+        return
+    console.print(f"[green]✓[/green] clixz {__version__} → {after}")
+    if not mcpd_running():
+        return
+    if os.geteuid() != 0:
+        console.print(f"[yellow]![/yellow] {MCPD_UNIT} still runs {__version__}: "
+                      f"`sudo {' '.join(RESTART_MCPD)}`")
+        return
+    restarted = subprocess.run(RESTART_MCPD, check=False)
+    if restarted.returncode == 0:
+        console.print(f"[green]✓[/green] Restarted {MCPD_UNIT} on the new version.")
+    else:
+        err.print(f"[red]✗[/red] Could not restart {MCPD_UNIT}: "
+                  f"`sudo {' '.join(RESTART_MCPD)}`")
+        raise typer.Exit(code=1)
 
 
 def cli_main() -> None:  # pragma: no cover

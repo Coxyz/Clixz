@@ -19,6 +19,12 @@ class ReadTests(unittest.TestCase):
         self.assertIn("apps/atuin", build_argv({"cmd": "check", "service": "apps/atuin"}))
         self.assertNotIn("apps/atuin", build_argv({"cmd": "check"}))
 
+    def test_check_verbose_is_a_flag_not_a_value(self) -> None:
+        self.assertIn("--verbose", build_argv({"cmd": "check", "verbose": True}))
+        self.assertNotIn("--verbose", build_argv({"cmd": "check", "verbose": "--config x"}))
+        self.assertNotIn("--verbose", build_argv({"cmd": "show", "service": "apps/x",
+                                                  "verbose": True}))
+
     def test_manifest_is_always_a_dry_run(self) -> None:
         self.assertIn("--dry-run", build_argv({"cmd": "manifest"}))
 

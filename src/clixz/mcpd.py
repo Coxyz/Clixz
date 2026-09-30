@@ -122,6 +122,9 @@ def build_argv(req: dict) -> list[str]:
             service = _service(req.get("service"), required=(cmd == "show"))
             if service:
                 argv.append(service)
+        # The MCP tool has always offered `verbose`; until 2.2 it was dropped here.
+        if cmd == "check" and req.get("verbose") is True:
+            argv.append("--verbose")
         if cmd == "ls":
             category = req.get("category")
             if category is not None:

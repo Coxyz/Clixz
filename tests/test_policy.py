@@ -10,6 +10,7 @@ from pathlib import Path
 from clixz.config import parse_config
 from clixz.policy import (
     Severity,
+    audit_all,
     audit_service,
     is_excluded,
     list_services,
@@ -137,6 +138,22 @@ class DiscoveryTests(unittest.TestCase):
     def test_undeclared_directory_is_reported_not_removed(self) -> None:
         (self.root / "scratch").mkdir()
         self.assertEqual(["scratch"], [p.name for p in unknown_category_dirs(self.config)])
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
+    def test_an_unreadable_category_is_reported_not_fatal(self) -> None:
+        (self.root / "infra").chmod(0o000)
+        try:
+            self.assertEqual(
+                [("apps", "demo"), ("apps", "other")],
+                [(c, s) for c, s, _ in list_services(self.config)],
+            )
+            reports = audit_all(self.config)
+        finally:
+            (self.root / "infra").chmod(0o750)
+        infra = [r for r in reports if r.category == "infra"]
+        self.assertEqual([""], [r.service for r in infra])
+        self.assertIn("unreadable", [f.rule for f in infra[0].findings])
+        self.assertIs(Severity.ERROR, infra[0].worst)
 
     def test_dot_directories_are_invisible(self) -> None:
         (self.root / ".archive").mkdir()

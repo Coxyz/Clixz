@@ -9,6 +9,7 @@ container's state directory is a good way to break it.
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -96,12 +97,25 @@ def list_categories(config: Config) -> list[str]:
     )
 
 
+def category_readable(config: Config, category: str) -> bool:
+    """Whether this account can list the category's services.
+
+    Every category directory is owner+group only, so a process that lacks the
+    category's group (clixz-mcpd before its unit was updated) cannot see in.
+    """
+    return os.access(config.root_dir / category, os.R_OK | os.X_OK)
+
+
 def list_services(config: Config, category: str | None = None) -> list[tuple[str, str, Path]]:
-    """Return ``(category, service, path)`` for every service directory."""
+    """Return ``(category, service, path)`` for every service directory.
+
+    An unreadable category contributes nothing rather than failing the whole
+    listing; ``audit_all`` reports it as an error so the gap stays visible.
+    """
     out: list[tuple[str, str, Path]] = []
     for cat in ([category] if category else list_categories(config)):
         cat_dir = config.root_dir / cat
-        if not cat_dir.is_dir():
+        if not cat_dir.is_dir() or not category_readable(config, cat):
             continue
         for entry in sorted(cat_dir.iterdir()):
             if entry.is_dir() and not entry.name.startswith(".") and not is_excluded(config, entry):
@@ -234,7 +248,17 @@ def audit_category_dir(config: Config, category: str) -> ServiceReport:
 def audit_all(config: Config, category: str | None = None) -> list[ServiceReport]:
     reports: list[ServiceReport] = []
     for cat in ([category] if category else list_categories(config)):
-        reports.append(audit_category_dir(config, cat))
+        report = audit_category_dir(config, cat)
+        reports.append(report)
+        if not category_readable(config, cat):
+            group = config.category(cat).group
+            report.findings.append(Finding(
+                report.path, Severity.ERROR,
+                f"unreadable by this account (missing group {group}): "
+                "its services were not audited",
+                rule="unreadable",
+            ))
+            continue
         for c, service, _ in list_services(config, cat):
             reports.append(audit_service(config, c, service))
     return reports

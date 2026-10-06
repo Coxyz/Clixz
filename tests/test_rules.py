@@ -152,7 +152,6 @@ class LoadTests(unittest.TestCase):
         config, _ = load_config(self.dir / "config.yaml")
         self.assertEqual("off", config.policy.lint.level("image-latest"))
         self.assertEqual(self.dir / "manifest.json", config.resolved_manifest_path)
-        self.assertEqual(self.dir / "npm-hosts.json", config.resolved_npm_snapshot)
 
         (self.dir / "tree" / "apps" / "demo").mkdir(parents=True)
         report = audit_service(config, "apps", "demo")

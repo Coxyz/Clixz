@@ -74,13 +74,56 @@ class NpmConfig:
     point is not enforcement — it is that the audit found 24 proxy hosts where
     the service descriptors declared 9, and nothing in the system noticed.
 
-    ``snapshot`` is a copy of the proxy hosts that root writes with
-    ``clixz exposed --snapshot`` and anyone may read. It is how the unprivileged
-    ``clixz-mcpd`` answers ``exposed`` without ever being given the database.
+    Until 2.3 a timer copied the hosts to a snapshot for the unprivileged
+    gateway. Since 2.3 the gateway relays ``exposed`` to ``clixz-apply``, which
+    runs as root for that one request and reads the database live.
     """
 
     database: Path | None = None
-    snapshot: Path | None = None
+
+
+@dataclass(frozen=True)
+class StateConfig:
+    """What clixz keeps between runs: the plans the AI prepared, and the todo.
+
+    ``plans/`` is root's alone — nobody else can write a plan, which is what
+    makes a plan id worth trusting. ``todo.yaml`` is readable by everyone and
+    writable by ``group``, the operators, so that editing it never needs sudo.
+    """
+
+    dir: Path = Path("/var/lib/clixz")
+    group: str = "docker"
+
+    @property
+    def plans_dir(self) -> Path:
+        return self.dir / "plans"
+
+    @property
+    def todo_file(self) -> Path:
+        return self.dir / "todo.yaml"
+
+
+DEFAULT_KOMODO_CREDENTIALS = DEFAULT_CONFIG_DIR / "komodo.yaml"
+
+
+@dataclass(frozen=True)
+class KomodoConfig:
+    """Where a new service's stack gets created, if anywhere.
+
+    Komodo deploys every service from the tree, which Periphery mounts at
+    ``run_root``. Without a ``komodo`` section ``credentials`` is None and
+    ``clixz new`` leaves Komodo alone, as it always did.
+    """
+
+    credentials: Path | None = None
+    server: str | None = None
+    container: str = "komodo-core"
+    port: int = 9120
+    run_root: str = "/services"
+
+    @property
+    def enabled(self) -> bool:
+        return self.credentials is not None
 
 
 # Every rule, with its built-in default. A config may override any of them; one
@@ -110,6 +153,8 @@ class Config:
     images_dir: Path = Path("/opt/images")
     repos_dir: Path = Path("/opt/repos")
     npm: NpmConfig = field(default_factory=NpmConfig)
+    state: StateConfig = field(default_factory=StateConfig)
+    komodo: KomodoConfig = field(default_factory=KomodoConfig)
     # The directory config.yaml was read from; None for the bundled default.
     config_dir: Path | None = None
     # lint.yaml and ignore.yaml, read from config_dir.
@@ -133,12 +178,6 @@ class Config:
         if self.manifest_path is not None:
             return self.manifest_path
         return (self.config_dir or DEFAULT_CONFIG_DIR) / "manifest.json"
-
-    @property
-    def resolved_npm_snapshot(self) -> Path:
-        if self.npm.snapshot is not None:
-            return self.npm.snapshot
-        return (self.config_dir or DEFAULT_CONFIG_DIR) / "npm-hosts.json"
 
 
 # ─── loading ─────────────────────────────────────────────────────────────────
@@ -217,7 +256,6 @@ def parse_config(raw: dict) -> Config:
     if isinstance(npm_raw, dict):
         npm = NpmConfig(
             database=Path(str(npm_raw["database"])) if npm_raw.get("database") else None,
-            snapshot=Path(str(npm_raw["snapshot"])) if npm_raw.get("snapshot") else None,
         )
 
     return Config(
@@ -229,6 +267,40 @@ def parse_config(raw: dict) -> Config:
         images_dir=images_dir,
         repos_dir=repos_dir,
         npm=npm,
+        state=_parse_state(raw.get("state")),
+        komodo=_parse_komodo(raw.get("komodo")),
+    )
+
+
+def _parse_state(raw: object) -> StateConfig:
+    state = StateConfig()
+    if isinstance(raw, dict):
+        state = StateConfig(
+            dir=Path(str(raw["dir"])) if raw.get("dir") else state.dir,
+            group=str(raw["group"]) if raw.get("group") else state.group,
+        )
+    # The environment wins: it is how tests and a development checkout point
+    # clixz at a scratch directory without touching the host's config.
+    override = env("STATE_DIR")
+    if override:
+        state = replace(state, dir=Path(override))
+    return state
+
+
+def _parse_komodo(raw: object) -> KomodoConfig:
+    if not isinstance(raw, dict):
+        return KomodoConfig()
+    default = KomodoConfig()
+    try:
+        port = int(raw.get("port") or default.port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"komodo.port must be a number: {exc}") from exc
+    return KomodoConfig(
+        credentials=Path(str(raw.get("credentials") or DEFAULT_KOMODO_CREDENTIALS)),
+        server=str(raw["server"]) if raw.get("server") else None,
+        container=str(raw.get("container") or default.container),
+        port=port,
+        run_root=str(raw.get("run_root") or default.run_root).rstrip("/") or "/",
     )
 
 
@@ -249,15 +321,18 @@ def load_raw_config(source: Path | None) -> dict:
 # ─── structural validation (for `clixz check`) ───────────────────────────────
 
 KNOWN_TOP_LEVEL = {"root_dir", "categories", "rules", "exclude", "api", "images",
-                   "repos", "npm"}
+                   "repos", "npm", "state", "komodo"}
 
 # Sections v1 understood and v2 does not. Naming them explicitly turns "unknown
 # key" — which reads like a typo — into an actionable migration message.
 RETIRED_KEYS = {
     "settings": "ACL principals are gone: v2 uses owner/mode only.",
-    "komodo": "ACL principals are gone: give Komodo Periphery cap_add DAC_OVERRIDE instead.",
     "dev": "`clixz dev` is gone: code-server is not deployed.",
 }
+
+# `komodo` came back in 2.3 with another meaning: where to create a new
+# service's stack. A key outside this set is most likely v1's ACL principal.
+KOMODO_KEYS = ("credentials", "server", "container", "port", "run_root")
 
 # `repos` came back in 2.2 with a single key. What v1 stored under it (owner,
 # mode, ACL, recursive) is still retired: /opt/repos is not audited.
@@ -315,6 +390,20 @@ def validate_config(raw: dict) -> list[str]:
     npm = raw.get("npm")
     if npm is not None and not isinstance(npm, dict):
         issues.append("'npm' must be a mapping with a 'database' path")
+    elif isinstance(npm, dict) and "snapshot" in npm:
+        issues.append("npm.snapshot was retired in 2.3 — `exposed` reads the database live, "
+                      "through clixz-apply; remove the key")
+
+    for section in ("state", "komodo"):
+        if raw.get(section) is not None and not isinstance(raw[section], dict):
+            issues.append(f"'{section}' must be a mapping")
+    if isinstance(raw.get("komodo"), dict):
+        for key in raw["komodo"]:
+            if key not in KOMODO_KEYS:
+                issues.append(
+                    f"unknown key komodo.{key} (known: {', '.join(KOMODO_KEYS)}) — v1's Komodo "
+                    "ACL principal is gone: give Komodo Periphery cap_add DAC_OVERRIDE instead"
+                )
 
     repos = raw.get("repos")
     if repos is not None and not isinstance(repos, dict):

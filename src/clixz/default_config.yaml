@@ -55,12 +55,26 @@ repos:
 
 # `clixz exposed` reads this database to compare what the reverse proxy
 # actually publishes against what the service descriptors declare. Read-only,
-# and it needs root. `sudo clixz exposed --snapshot` copies the proxy hosts to
-# npm-hosts.json, next to this file, so that an unprivileged reader (clixz-mcpd)
-# gets the same answer without being given the database.
+# and it needs root: the CLI goes through sudo, and the MCP gateway relays the
+# request to clixz-apply, which reads it live.
 npm:
   database: /srv/docker/network/npm/data/app/database.sqlite
-  # snapshot: /etc/clixz/npm-hosts.json
+
+# What clixz keeps between runs: plans/ (the plans prepared through the MCP,
+# root only) and todo.yaml (readable by everyone, writable by `group`).
+# CLIXZ_STATE_DIR overrides `dir`.
+# state:
+#   dir: /var/lib/clixz
+#   group: docker
+
+# Create the Komodo stack of every service `clixz new` creates — preconfigured,
+# not deployed. Without this section Komodo is left alone. The credentials file
+# (key, secret, optional url) is root's alone: 0600.
+# komodo:
+#   credentials: /etc/clixz/komodo.yaml
+#   server: boxyz          # Komodo server name or id (default: the only one)
+#   container: komodo-core # without a url, this container's IP, port 9120
+#   run_root: /services    # where Periphery mounts root_dir
 
 # The compose rules and the accepted exceptions are not in this file: see
 # lint.yaml and ignore.yaml next to it (`clixz rules`).

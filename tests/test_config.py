@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from clixz.config import DEFAULT_RULES, migrate_raw, parse_config, validate_config
 
@@ -109,12 +112,73 @@ class ParseTests(unittest.TestCase):
     def test_generated_files_default_to_next_to_the_config(self) -> None:
         cfg = parse_config(_v2())
         self.assertEqual("/etc/clixz/manifest.json", str(cfg.resolved_manifest_path))
-        self.assertEqual("/etc/clixz/npm-hosts.json", str(cfg.resolved_npm_snapshot))
 
     def test_repos_dir(self) -> None:
         self.assertEqual("/opt/repos", str(parse_config(_v2()).repos_dir))
         cfg = parse_config(_v2() | {"repos": {"dir": "/srv/git"}})
         self.assertEqual("/srv/git", str(cfg.repos_dir))
+
+
+class StateTests(unittest.TestCase):
+    def test_state_defaults_to_var_lib_clixz_and_the_docker_group(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLIXZ_STATE_DIR", None)
+            state = parse_config(_v2()).state
+        self.assertEqual(Path("/var/lib/clixz"), state.dir)
+        self.assertEqual("docker", state.group)
+        self.assertEqual(Path("/var/lib/clixz/plans"), state.plans_dir)
+        self.assertEqual(Path("/var/lib/clixz/todo.yaml"), state.todo_file)
+
+    def test_state_section_overrides_the_defaults(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLIXZ_STATE_DIR", None)
+            state = parse_config(_v2() | {"state": {"dir": "/srv/state", "group": "ops"}}).state
+        self.assertEqual(Path("/srv/state"), state.dir)
+        self.assertEqual("ops", state.group)
+
+    def test_the_environment_wins_over_the_config(self) -> None:
+        with mock.patch.dict(os.environ, {"CLIXZ_STATE_DIR": "/tmp/clixz-state"}):
+            state = parse_config(_v2() | {"state": {"dir": "/srv/state"}}).state
+        self.assertEqual(Path("/tmp/clixz-state"), state.dir)
+
+    def test_state_and_komodo_are_known_sections(self) -> None:
+        raw = _v2() | {"state": {"dir": "/var/lib/clixz"}, "komodo": {"server": "boxyz"}}
+        self.assertEqual([], validate_config(raw))
+
+
+class KomodoTests(unittest.TestCase):
+    def test_without_a_section_the_komodo_step_is_off(self) -> None:
+        self.assertFalse(parse_config(_v2()).komodo.enabled)
+
+    def test_a_section_without_credentials_uses_the_default_file(self) -> None:
+        komodo = parse_config(_v2() | {"komodo": {"server": "boxyz"}}).komodo
+        self.assertTrue(komodo.enabled)
+        self.assertEqual(Path("/etc/clixz/komodo.yaml"), komodo.credentials)
+        self.assertEqual("boxyz", komodo.server)
+        self.assertEqual("komodo-core", komodo.container)
+        self.assertEqual(9120, komodo.port)
+        self.assertEqual("/services", komodo.run_root)
+
+    def test_every_key_can_be_set(self) -> None:
+        komodo = parse_config(_v2() | {"komodo": {
+            "credentials": "/root/k.yaml", "container": "core", "port": 9000,
+            "run_root": "/stacks"}}).komodo
+        self.assertEqual(Path("/root/k.yaml"), komodo.credentials)
+        self.assertEqual(("core", 9000, "/stacks"), (komodo.container, komodo.port, komodo.run_root))
+        self.assertIsNone(komodo.server)
+
+    def test_a_v1_komodo_principal_is_reported_with_its_migration_hint(self) -> None:
+        issues = validate_config(_v2() | {"komodo": {"name": "boxyz_komodo", "kind": "group"}})
+        self.assertTrue(any("komodo.name" in i and "DAC_OVERRIDE" in i for i in issues), issues)
+
+    def test_a_non_mapping_section_is_reported(self) -> None:
+        self.assertTrue(any("komodo" in i for i in validate_config(_v2() | {"komodo": "yes"})))
+
+
+class SnapshotRetiredTests(unittest.TestCase):
+    def test_npm_snapshot_is_reported_as_retired(self) -> None:
+        issues = validate_config(_v2() | {"npm": {"database": "/x.sqlite", "snapshot": "/y.json"}})
+        self.assertTrue(any("npm.snapshot" in i and "2.3" in i for i in issues), issues)
 
 
 class MigrateTests(unittest.TestCase):

@@ -305,6 +305,13 @@ def _plan_edit(config: Config, request: Request) -> Plan:
     request = replace(request, service=target)
     plan.target, plan.request = target, request
 
+    # Before reading anything: the diff would show a link's target — maybe a
+    # .env — to whoever asked for the plan.
+    linked = [p for p in (path, path / COMPOSE, path / SERVICE_FILENAME) if p.is_symlink()]
+    if linked:
+        plan.blocked = [f"{p} is a symlink — refusing to read or write through it" for p in linked]
+        return plan
+
     current_compose, current_service = _read(path / COMPOSE), _read(path / SERVICE_FILENAME)
     compose = request.compose if request.compose != current_compose else None
     service_yaml = request.service_yaml if request.service_yaml != current_service else None

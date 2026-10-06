@@ -149,6 +149,15 @@ class EditTests(unittest.TestCase):
         self.assertEqual([str(self.svc / "compose.yaml"), str(self.svc / "service.yaml")], written)
         self.assertIn("cp", [c[0] for c in commands])
 
+    def test_editing_through_a_symlink_is_refused(self) -> None:
+        victim = self.root / "victim.env"
+        victim.write_text("SECRET=1", encoding="utf-8")
+        (self.svc / "service.yaml").unlink()
+        (self.svc / "service.yaml").symlink_to(victim)
+        with self.assertRaises(RuntimeError):
+            edit_service(self.config, "apps", "demo", compose=None, service_yaml=_GIVEN_SERVICE)
+        self.assertEqual("SECRET=1", victim.read_text(encoding="utf-8"))
+
     def test_editing_a_missing_service_is_refused(self) -> None:
         with self.assertRaises(RuntimeError):
             edit_service(self.config, "apps", "ghost", compose=_GIVEN_COMPOSE, service_yaml=None)

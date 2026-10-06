@@ -120,6 +120,10 @@ def edit_service(
     svc_path = config.root_dir / category / service
     if not svc_path.is_dir():
         raise RuntimeError(f"No such service: {category}/{service}")
+    # Written as root: through a link, the write would land on its target.
+    for path in (svc_path, svc_path / COMPOSE, svc_path / SERVICE_FILENAME):
+        if path.is_symlink():
+            raise RuntimeError(f"{path} is a symlink — refusing to write through it")
 
     file_rule = config.rule("file")
     runner = CommandRunner(dry_run=dry_run)

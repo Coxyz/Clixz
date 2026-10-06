@@ -34,7 +34,8 @@ class FakeKomodo:
 
     def __init__(self, stacks=(), servers=({"id": "s1", "name": "boxyz"},), fail=None):
         self.stacks = [dict(s) for s in stacks]
-        self.servers = [dict(s) for s in servers]
+        self.servers = ([dict(s) if isinstance(s, dict) else s for s in servers]
+                        if isinstance(servers, (list, tuple)) else servers)
         self.fail = fail
         self.requests: list[tuple[str, dict, dict]] = []
 
@@ -116,6 +117,12 @@ class CreateStackTests(unittest.TestCase):
         with self.assertRaises(KomodoError):
             create_stack(_config("nope"), name="demo", run_directory="/x",
                          client=_client(FakeKomodo()))
+
+    def test_an_answer_of_an_unexpected_shape_is_a_komodo_error(self) -> None:
+        for servers in ([{"name": "no-id"}], [["not", "a", "mapping"]], "nonsense"):
+            with self.assertRaises(KomodoError, msg=servers):
+                create_stack(_config(), name="demo", run_directory="/x",
+                             client=_client(FakeKomodo(servers=servers)))
 
     def test_an_http_error_carries_komodos_message(self) -> None:
         error = urllib.error.HTTPError(

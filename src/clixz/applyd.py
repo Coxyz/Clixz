@@ -149,6 +149,9 @@ def handle(raw: bytes, config: Config) -> dict[str, Any]:
     except OSError as exc:
         _log(f"{req.get('cmd')}: {exc}")
         return {"ok": False, "error": f"{req.get('cmd')} failed: {exc}"}
+    except Exception as exc:  # noqa: BLE001 - the caller must always get an answer
+        _log(f"{req.get('cmd')}: unexpected {exc!r}")
+        return {"ok": False, "error": f"{req.get('cmd')} failed unexpectedly: {exc!r}"}
 
 
 def main() -> None:

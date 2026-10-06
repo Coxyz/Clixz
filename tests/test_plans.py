@@ -194,6 +194,18 @@ class EditTests(PlanTestCase):
                                                        compose=COMPOSE + "# x\n"))
         self.assertTrue(any("Ambiguous" in b for b in plan.blocked), plan.blocked)
 
+    def test_a_symlinked_file_is_never_written_through(self) -> None:
+        svc = self.existing()
+        victim = self.base / "victim.env"
+        victim.write_text("SECRET=1", encoding="utf-8")
+        (svc / "compose.yaml").unlink()
+        (svc / "compose.yaml").symlink_to(victim)
+        plan = plans.compute(self.config, self.request(action="edit", service="apps/demo",
+                                                       compose=COMPOSE))
+        self.assertTrue(any("symlink" in b for b in plan.blocked), plan.blocked)
+        self.assertNotIn("SECRET", plan.diff)
+        self.assertEqual("SECRET=1", victim.read_text())
+
     def test_editing_into_a_lint_error_blocks(self) -> None:
         self.existing()
         plan = plans.compute(self.config, self.request(action="edit", service="apps/demo",

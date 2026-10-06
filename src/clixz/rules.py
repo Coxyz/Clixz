@@ -78,6 +78,7 @@ AUDIT_RULES: tuple[RuleSpec, ...] = (
     RuleSpec("owner", "error", "owner differs from the rule"),
     RuleSpec("mode", "error", "mode differs from the rule"),
     RuleSpec("acl", "warn", "POSIX ACL entries left by v1"),
+    RuleSpec("symlink", "error", "a path of the skeleton is a symbolic link (never followed)"),
 )
 
 LINT_IDS = tuple(r.id for r in LINT_RULES)

@@ -65,6 +65,21 @@ class AuditTests(unittest.TestCase):
         report = audit_service(self.config, "apps", "demo")
         self.assertEqual(Severity.OK, report.worst, [f.message for f in report.findings])
 
+    def test_a_symlink_in_the_skeleton_is_an_error_never_fixed(self) -> None:
+        # chown and chmod follow links: run as root, `fix` would hand the link's
+        # target — another service's .env — to this category's account.
+        victim = self.root / "victim.env"
+        victim.write_text("SECRET=1", encoding="utf-8")
+        victim.chmod(0o600)
+        (self.svc / "config").rmdir()
+        (self.svc / "config").symlink_to(victim)
+        report = audit_service(self.config, "apps", "demo")
+        linked = [f for f in report.findings if f.path == self.svc / "config"]
+        self.assertEqual(1, len(linked), [f.message for f in linked])
+        self.assertEqual(Severity.ERROR, linked[0].severity)
+        self.assertEqual("symlink", linked[0].rule)
+        self.assertIsNone(linked[0].fix)
+
     def test_wrong_mode_is_an_error_with_a_fix(self) -> None:
         (self.svc / "compose.yaml").chmod(0o664)
         report = audit_service(self.config, "apps", "demo")

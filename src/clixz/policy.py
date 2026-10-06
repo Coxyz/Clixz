@@ -155,6 +155,13 @@ def _audit_path(
 ) -> list[Finding]:
     rule = config.rule(rule_name)
     expected_owner = rule.owner or owner
+    # chown and chmod follow links. Run as root, a fix on a link would hand its
+    # target — another service's .env, say — to this category's account: a
+    # container that can write its service directory could aim it anywhere.
+    if path.is_symlink():
+        return [Finding(path, Severity.ERROR,
+                        "is a symbolic link — clixz never follows one as root; "
+                        "replace it with the real file or directory", rule="symlink")]
     state: PathState = read_state(path)
     findings: list[Finding] = []
 

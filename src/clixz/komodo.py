@@ -158,10 +158,13 @@ def create_stack(config: Config, *, name: str, run_directory: str,
                  client: Client | None = None) -> str:
     """Create the stack unless one of that name exists; return what happened."""
     client = client or client_for(config)
-    for stack in client.read("ListStacks", {}) or []:
-        if stack.get("name") == name:
-            return f"Komodo already has a stack named {name} — left as is"
-    server_id, server_name = _server_id(config, client)
+    try:
+        for stack in client.read("ListStacks", {}) or []:
+            if stack.get("name") == name:
+                return f"Komodo already has a stack named {name} — left as is"
+        server_id, server_name = _server_id(config, client)
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise KomodoError(f"unexpected answer from Komodo: {exc!r}") from exc
     client.write("CreateStack", {"name": name, "config": {
         "server_id": server_id, "files_on_host": True, "run_directory": run_directory,
     }})

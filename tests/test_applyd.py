@@ -116,6 +116,12 @@ class ApplydTests(unittest.TestCase):
                         {"cmd": "todo-rm", "id": 7}):
             self.assertFalse(_send(self.config, payload)["ok"], payload)
 
+    def test_an_unexpected_error_still_gets_an_answer(self) -> None:
+        with mock.patch("clixz.applyd.exposure_payload", side_effect=KeyError("boom")):
+            answer = _send(self.config, {"cmd": "exposed"})
+        self.assertFalse(answer["ok"])
+        self.assertIn("boom", answer["error"])
+
     def test_exposed_answers_even_without_a_database(self) -> None:
         answer = _send(self.config, {"cmd": "exposed"})
         self.assertTrue(answer["ok"])

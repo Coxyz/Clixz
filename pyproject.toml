@@ -38,6 +38,9 @@ clixz = "clixz.cli:app"
 # its code lands under the root-owned venv: the ExecStart target cannot be
 # rewritten by an application group.
 clixz-mcpd = "clixz.mcpd:main"
+# The per-request root applier, started by clixz-apply.socket. Same reasoning:
+# a console script under the root-owned venv, reached through /usr/local/bin.
+clixz-apply = "clixz.applyd:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "clixz.__version__" }

@@ -106,6 +106,11 @@ class TodoTests(unittest.TestCase):
         with self.assertRaises(TodoError):
             self.store.items()
 
+    def test_a_missing_directory_is_created_on_the_first_write(self) -> None:
+        store = TodoStore(Path(self._tmp.name) / "state" / "todo.yaml")
+        store.add("first")
+        self.assertEqual(["first"], [i.title for i in store.items()])
+
     def test_writing_in_place_keeps_the_inode(self) -> None:
         self.store.add("first")
         inode = self.path.stat().st_ino

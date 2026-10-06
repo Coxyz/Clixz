@@ -168,6 +168,10 @@ class TodoStore:
     def _transaction(self) -> Iterator[tuple[list[Item], list[int]]]:
         """Yield ``(items, [next_id])`` locked; write them back on success."""
         created = not self.path.exists()
+        if created:
+            # `clixz daemon install` makes it root:<group> 2775; before that,
+            # a first write still has to land somewhere.
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, FILE_MODE)
         with os.fdopen(fd, "r+", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)

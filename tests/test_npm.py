@@ -7,14 +7,17 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import yaml
+
+from clixz.config import parse_config
 from clixz.npm import (
     NpmUnavailable,
     ProxyHost,
     cross_check,
+    exposure_payload,
     read_proxy_hosts,
-    read_snapshot,
-    snapshot_json,
 )
 
 _ROWS = [
@@ -101,33 +104,41 @@ class CrossCheckTests(unittest.TestCase):
         self.assertEqual([], [m for _, m in report.findings if "no such container" in m])
 
 
-class SnapshotTests(unittest.TestCase):
+class ExposurePayloadTests(unittest.TestCase):
+    """The JSON `clixz exposed --json` prints and clixz-apply returns."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self._tmp.name) / "npm-hosts.json"
+        base = Path(self._tmp.name)
+        self.database = base / "database.sqlite"
+        svc = base / "tree" / "apps" / "bitwarden"
+        svc.mkdir(parents=True)
+        (svc / "service.yaml").write_text(yaml.safe_dump({"url": "https://vault.coxyz.fr"}),
+                                          encoding="utf-8")
+        self.raw = {"root_dir": str(base / "tree"),
+                    "categories": {"apps": {"user": "root", "group": "root"}},
+                    "npm": {"database": str(self.database)}}
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_a_snapshot_gives_back_what_was_read(self) -> None:
-        hosts = [ProxyHost(["vault.coxyz.fr"], True, 0, "bitwarden", 80),
-                 ProxyHost(["code.coxyz.fr"], False, 3, "code-server", 8443)]
-        self.path.write_text(snapshot_json(hosts, {"bitwarden"}), encoding="utf-8")
-        read, containers, taken_at = read_snapshot(self.path)
-        self.assertEqual(hosts, read)
-        self.assertEqual({"bitwarden"}, containers)
-        self.assertTrue(taken_at)
+    def test_read_live_with_hosts_findings_and_a_summary(self) -> None:
+        _database(self.database)
+        with mock.patch("clixz.npm.running_containers", return_value={"bitwarden"}):
+            payload = exposure_payload(parse_config(self.raw))
+        self.assertTrue(payload["available"])
+        self.assertEqual("database", payload["source"])
+        self.assertEqual(len(_ROWS), payload["summary"]["total"])
+        self.assertIn("vault.coxyz.fr", [d for h in payload["hosts"] for d in h["domains"]])
+        self.assertTrue(any("mcp.coxyz.fr" in f["message"] for f in payload["findings"]))
 
-    def test_unknown_containers_stay_unknown(self) -> None:
-        # None means docker could not be asked; an empty set would wrongly
-        # declare every proxy target dead.
-        self.path.write_text(snapshot_json([], None), encoding="utf-8")
-        self.assertIsNone(read_snapshot(self.path)[1])
+    def test_an_unreadable_database_is_unavailable_with_a_reason(self) -> None:
+        payload = exposure_payload(parse_config(self.raw))
+        self.assertFalse(payload["available"])
+        self.assertIn("no such database", payload["reason"])
 
-    def test_a_missing_or_broken_snapshot_is_unavailable_not_a_crash(self) -> None:
-        with self.assertRaises(NpmUnavailable):
-            read_snapshot(self.path)
-        self.path.write_text('{"hosts": [{"domains": 3}]}', encoding="utf-8")
-        with self.assertRaises(NpmUnavailable):
-            read_snapshot(self.path)
+    def test_a_host_without_npm_says_so(self) -> None:
+        payload = exposure_payload(parse_config(self.raw | {"npm": {"database": None}}))
+        self.assertFalse(payload["available"])
+        self.assertIn("disabled", payload["reason"])
 

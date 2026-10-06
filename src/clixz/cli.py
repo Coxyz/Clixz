@@ -47,7 +47,6 @@ from .image import DOCKERFILE_NAME, dockerfile_template, validate_image_name
 from .meta import (
     SERVICE_FILENAME,
     build_manifest,
-    declared_urls,
     manifest_json,
     scaffold_template,
     write_manifest,
@@ -450,98 +449,41 @@ def check_cmd(
 
 @app.command("exposed", rich_help_panel=INSPECT)
 def exposed_cmd(
-    snapshot: Annotated[bool, typer.Option(
-        "--snapshot", help="As root: copy the proxy hosts to a file anyone may read.")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Compare what the reverse proxy publishes against what the tree declares.
 
-    Reading the NPM database needs root. Without it the command falls back on
-    the snapshot root last wrote with --snapshot, and says how old it is; with
-    neither, it reports what it could not read rather than pretending all is
-    well.
+    The NPM database is root's: run unprivileged, the command goes through
+    sudo. It is read at the moment of the question — there is no snapshot.
     """
     database = ctx.config.npm.database
-    if database is None:
-        message = "npm.database is disabled in the config — nothing to cross-check"
-        if json_out:
-            return emit({"available": False, "reason": message})
-        console.print(f"[yellow]![/yellow] {message}")
-        return
-
-    snapshot_path = ctx.config.resolved_npm_snapshot
-    if snapshot:
+    if database is not None and not os.access(database.parent, os.X_OK) and os.geteuid() != 0:
         ensure_root()
-        try:
-            hosts = npm_mod.read_proxy_hosts(database)
-        except npm_mod.NpmUnavailable as exc:
-            err.print(f"[red]ERROR[/red] {exc}")
-            raise typer.Exit(code=1)
-        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        snapshot_path.write_text(
-            npm_mod.snapshot_json(hosts, npm_mod.running_containers()), encoding="utf-8")
-        # Explicit, because root's umask on a hardened host would leave it 640
-        # and the whole point is that the unprivileged daemon can read it.
-        snapshot_path.chmod(0o644)
-        if json_out:
-            return emit({"ok": True, "snapshot": str(snapshot_path), "hosts": len(hosts)})
-        console.print(f"[green]✓[/green] Wrote {snapshot_path} ({len(hosts)} proxy host(s)).")
-        return
-
-    source, taken_at = "database", None
-    try:
-        hosts = npm_mod.read_proxy_hosts(database)
-        containers = npm_mod.running_containers()
-    except npm_mod.NpmUnavailable as exc:
-        try:
-            hosts, containers, taken_at = npm_mod.read_snapshot(snapshot_path)
-            source = "snapshot"
-        except npm_mod.NpmUnavailable as snapshot_exc:
-            reason = (f"{exc} {snapshot_exc}. "
-                      "Run `sudo clixz exposed --snapshot` to write one.")
-            if json_out:
-                return emit({"available": False, "reason": reason})
-            err.print(f"[yellow]![/yellow] {reason}")
-            raise typer.Exit(code=0)
-
-    report = npm_mod.cross_check(hosts, declared_urls(ctx.config), containers)
-
+    payload = npm_mod.exposure_payload(ctx.config)
     if json_out:
-        return emit({
-            "available": True,
-            "source": source,
-            "snapshot_at": taken_at,
-            "hosts": [
-                {"domains": h.domains, "enabled": h.enabled,
-                 "access_list_id": h.access_list_id, "target": h.target}
-                for h in report.hosts
-            ],
-            "findings": [{"level": lvl, "message": msg} for lvl, msg in report.findings],
-            "summary": {"total": len(report.hosts), "enabled": len(report.enabled_hosts)},
-        })
+        return emit(payload)
+    if not payload["available"]:
+        console.print(f"[yellow]![/yellow] {escape(payload['reason'])}")
+        return
 
     table = Table(box=None, pad_edge=False)
     for column in ("DOMAIN", "TARGET", "ENABLED", "ACCESS LIST"):
         table.add_column(column, overflow="fold")
-    for host in report.hosts:
+    for host in payload["hosts"]:
         table.add_row(
-            ", ".join(host.domains), host.target,
-            "[green]yes[/green]" if host.enabled else "[dim]no[/dim]",
-            "[dim]none[/dim]" if host.access_list_id == 0 else str(host.access_list_id),
+            ", ".join(host["domains"]), host["target"],
+            "[green]yes[/green]" if host["enabled"] else "[dim]no[/dim]",
+            "[dim]none[/dim]" if host["access_list_id"] == 0 else str(host["access_list_id"]),
         )
     console.print(table)
 
-    if report.findings:
+    if payload["findings"]:
         console.print()
-        for level, message in report.findings:
-            style = _LINT_STYLE[level]
-            console.print(f"[{style}]{level:5}[/{style}] {escape(message)}")
-    console.print(
-        f"\n[dim]{len(report.hosts)} proxy host(s), "
-        f"{len(report.enabled_hosts)} enabled"
-        + (f" — from the snapshot of {taken_at}" if source == "snapshot" else "")
-        + ".[/dim]"
-    )
+        for finding in payload["findings"]:
+            style = _LINT_STYLE[finding["level"]]
+            console.print(f"[{style}]{finding['level']:5}[/{style}] {escape(finding['message'])}")
+    summary = payload["summary"]
+    console.print(f"\n[dim]{summary['total']} proxy host(s), {summary['enabled']} enabled.[/dim]")
 
 
 @app.command("rules", rich_help_panel=INSPECT)

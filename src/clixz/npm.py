@@ -10,11 +10,11 @@ So this module reads that database. It is read-only, it needs root, and it
 degrades to a warning when it cannot read — an unreadable database is a fact to
 report, not a reason to fail.
 
-The snapshot is how an unprivileged reader gets the same answer. Root copies
-the proxy hosts (and the container names, which need the Docker socket) into a
-world-readable JSON file; ``clixz-mcpd`` reads that. The alternative was to let
-the daemon read a root-owned database, and every way of doing that — a group on
-NPM's data, an ACL, a sudo rule — hands it more than the dozen fields it needs.
+Until 2.3 a timer copied the hosts every 15 minutes into a world-readable
+snapshot for the unprivileged gateway, which then answered with data up to a
+quarter of an hour old. Now the gateway relays ``exposed`` to ``clixz-apply``,
+a root process started for that one request, which reads the database at the
+moment of the question. Nothing hands the gateway the database itself.
 """
 
 from __future__ import annotations
@@ -24,10 +24,13 @@ import os
 import shutil
 import sqlite3
 import subprocess
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
+
+from .config import Config
+from .meta import declared_urls
 
 
 @dataclass(frozen=True)
@@ -103,41 +106,6 @@ def running_containers() -> set[str] | None:
     except (subprocess.SubprocessError, OSError):
         return None
     return {line.strip() for line in out.splitlines() if line.strip()}
-
-
-SNAPSHOT_SCHEMA = 1
-
-
-def snapshot_json(hosts: list[ProxyHost], containers: set[str] | None) -> str:
-    return json.dumps({
-        "schema": SNAPSHOT_SCHEMA,
-        "taken_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "hosts": [asdict(h) for h in hosts],
-        "containers": sorted(containers) if containers is not None else None,
-    }, ensure_ascii=False, indent=2) + "\n"
-
-
-def read_snapshot(path: Path) -> tuple[list[ProxyHost], set[str] | None, str]:
-    """``(hosts, containers, taken_at)`` from a snapshot, or :class:`NpmUnavailable`."""
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        hosts = [
-            ProxyHost(
-                domains=[str(d) for d in h["domains"]],
-                enabled=bool(h["enabled"]),
-                access_list_id=int(h["access_list_id"]),
-                forward_host=str(h["forward_host"]),
-                forward_port=int(h["forward_port"]),
-            )
-            for h in raw["hosts"]
-        ]
-        containers = raw.get("containers")
-        return (hosts, set(containers) if containers is not None else None,
-                str(raw.get("taken_at", "")))
-    except OSError as exc:
-        raise NpmUnavailable(f"no snapshot at {path} ({exc.strerror})") from exc
-    except (ValueError, KeyError, TypeError) as exc:
-        raise NpmUnavailable(f"unreadable snapshot {path}: {exc}") from exc
 
 
 @dataclass
@@ -220,3 +188,28 @@ def cross_check(
                 "warn", f"{service} declares {hostname} but NPM does not publish it",
             ))
     return report
+
+
+def exposure_payload(config: Config) -> dict[str, Any]:
+    """What ``clixz exposed --json`` prints, read live. Never raises."""
+    database = config.npm.database
+    if database is None:
+        return {"available": False,
+                "reason": "npm.database is disabled in the config — nothing to cross-check"}
+    try:
+        hosts = read_proxy_hosts(database)
+    except NpmUnavailable as exc:
+        return {"available": False, "reason": str(exc)}
+    report = cross_check(hosts, declared_urls(config), running_containers())
+    return {
+        "available": True,
+        "source": "database",
+        "hosts": [
+            {"domains": h.domains, "enabled": h.enabled,
+             "access_list_id": h.access_list_id, "target": h.target}
+            for h in report.hosts
+        ],
+        "findings": [{"level": lvl, "message": msg} for lvl, msg in report.findings],
+        "summary": {"total": len(report.hosts), "enabled": len(report.enabled_hosts)},
+    }
+

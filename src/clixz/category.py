@@ -104,9 +104,8 @@ def _build(config: Config, source: Path | None, name: str, account: str | None,
 
     plan = CategoryPlan(commands=runner.executed)
     plan.notes = [
-        f"clixz-mcpd reads the tree through its groups: add {account} to "
-        "SupplementaryGroups in /etc/systemd/system/clixz-mcpd.service, then "
-        "`sudo systemctl daemon-reload && sudo systemctl restart clixz-mcpd`.",
+        f"clixz-mcpd reads the tree through its groups: `sudo clixz daemon install` "
+        f"adds {account} to them and restarts it.",
         f"The MCP container does the same: add the GID of group {account} "
         f"(`getent group {account}` — not the user's UID, `id -u {account}`) "
         "to group_add in its compose.yaml and redeploy it.",

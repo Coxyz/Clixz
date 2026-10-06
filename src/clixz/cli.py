@@ -1,20 +1,22 @@
 """clixz command line.
 
-Verbs in five groups, which are also the panels of ``clixz --help``: inspect
-(``ls``, ``show``, ``check``, ``exposed``, ``rules``), change (``new``, ``fix``,
-``rm``, ``category``), publish (``meta``, ``manifest``), development (``image``,
-``repo``), and clixz itself (``config``, ``mcp``, ``upgrade``).
+Verbs in six groups, which are also the panels of ``clixz --help``: inspect
+(``ls``, ``show``, ``check``, ``exposed``, ``rules``), change (``new``,
+``edit``, ``fix``, ``rm``, ``plan``, ``category``), publish (``meta``,
+``manifest``), to do (``todo``), development (``image``, ``repo``), and clixz
+itself (``config``, ``mcp``, ``daemon``, ``upgrade``).
 
-Every write verb accepts ``--plan``: it prints the commands it would run, as
-JSON when asked, and writes nothing. That flag is what lets ``clixz-mcpd``
-expose mutations to an automated caller without holding any privilege — the
-daemon only ever runs the planning half, and a human runs the other.
+Every write verb accepts ``--plan``: it prints what it would do, as JSON when
+asked, and writes nothing. ``new`` and ``edit`` compute their plan with
+``plans.compute`` — the same code that plans for the MCP server — so a change
+the AI would be refused (an unaccepted lint error) is refused here too.
 """
 
 from __future__ import annotations
 
 import json as jsonlib
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,7 @@ from . import compose as compose_mod
 from . import daemon as daemon_mod
 from . import mcpd as mcpd_mod
 from . import npm as npm_mod
+from . import plans as plans_mod
 from . import repo as repo_mod
 from . import rules as rules_mod
 from .archive import archive_service, list_archived
@@ -65,8 +68,8 @@ from .policy import (
     resolve_service,
     unknown_category_dirs,
 )
-from .scaffold import CreateRequest, create_service, plan_create
 from .system import CommandExecutionError, missing_bins
+from .todo import OPEN_STATES, STATES, TodoError, TodoStore
 from .upgrade import (
     UMASK,
     installed_version,
@@ -86,6 +89,7 @@ app = typer.Typer(
 INSPECT = "Inspect — read-only"
 CHANGE = "Change — need root, accept --plan"
 PUBLISH = "Publish — service descriptors"
+TODO = "To do — shared with the AI"
 DEVELOP = "Development directories"
 ITSELF = "clixz itself"
 
@@ -97,6 +101,15 @@ app.add_typer(repo_app, name="repo", rich_help_panel=DEVELOP)
 category_app = typer.Typer(help="Categories: a system account, a directory, a config entry.",
                            no_args_is_help=True)
 app.add_typer(category_app, name="category", rich_help_panel=CHANGE)
+plan_app = typer.Typer(help="Plans prepared through the MCP server, waiting to be applied.",
+                       no_args_is_help=True)
+app.add_typer(plan_app, name="plan", rich_help_panel=CHANGE)
+todo_app = typer.Typer(help="What is left to do. The AI reads and writes the same list.",
+                       no_args_is_help=True)
+app.add_typer(todo_app, name="todo", rich_help_panel=TODO)
+daemon_app = typer.Typer(help="clixz's own units: the MCP gateway and the root applier.",
+                         no_args_is_help=True)
+app.add_typer(daemon_app, name="daemon", rich_help_panel=ITSELF)
 
 console = Console()
 err = Console(stderr=True)
@@ -582,48 +595,148 @@ def _render_plan(commands: list[list[str]], *, json_out: bool, action: str,
     console.print(f"\n[dim]{len(commands)} command(s). Nothing written.[/dim]")
 
 
-@app.command("new", rich_help_panel=CHANGE)
-def new_cmd(
-    service: Annotated[str, typer.Argument(help="category/service")],
-    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
-    json_out: Annotated[bool, typer.Option("--json")] = False,
-    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
-) -> None:
-    """Create a service tree with a compose template you are meant to edit."""
-    if "/" not in service:
-        err.print("[red]ERROR[/red] Give a category/service, e.g. apps/myapp.")
-        raise typer.Exit(code=2)
-    category, _, name = service.partition("/")
+def _tree_needs_root() -> bool:
+    """Whether writing the tree needs root: some category belongs to someone else."""
+    if os.geteuid() == 0:
+        return False
+    me = pwd.getpwuid(os.getuid()).pw_name
+    return any(cat.user != me for cat in ctx.config.categories.values())
 
+
+def _read_input(value: Optional[str], what: str) -> Optional[str]:
+    if value is None:
+        return None
     try:
-        commands = plan_create(ctx.config, CreateRequest(category, name))
-    except (KeyError, ValueError, RuntimeError) as exc:
+        return sys.stdin.read() if value == "-" else Path(value).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        err.print(f"[red]ERROR[/red] Cannot read the {what} from {value}: {exc}")
+        raise typer.Exit(code=2)
+
+
+def _diff_lines(diff: str) -> None:
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---")):
+            console.print(f"[bold]{escape(line)}[/bold]")
+        elif line.startswith("+"):
+            console.print(f"[green]{escape(line)}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{escape(line)}[/red]")
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{escape(line)}[/cyan]")
+        else:
+            console.print(escape(line))
+
+
+def _show_plan(plan: plans_mod.Plan) -> None:
+    title = f"Plan {plan.id} — " if plan.id else "Plan — "
+    console.print(f"[bold]{title}{plan.action} {escape(plan.target)}[/bold]"
+                  + (f"  [dim]{plan.status()}, from {plan.origin}, expires {plan.expires_at}[/dim]"
+                     if plan.id else ""))
+    for command in plan.commands:
+        console.print(f"  {escape(' '.join(command))}")
+    if plan.diff:
+        console.print()
+        _diff_lines(plan.diff)
+    shown = [row for row in plan.lint if row["level"] != "info" or row["ignored"]]
+    if shown:
+        console.print("\n[bold]Compose[/bold]")
+    for row in shown:
+        style = _LINT_STYLE.get(row["level"], "dim")
+        prefix = f"{row['service']}: " if row["service"] else ""
+        note = f" [dim]— accepted: {escape(row['ignored'])}[/dim]" if row["ignored"] else ""
+        console.print(f"  [{style}]{row['level']:5}[/{style}] {escape(prefix + row['message'])} "
+                      f"[dim]({row['rule']})[/dim]{note}")
+    for warning in plan.warnings:
+        console.print(f"[yellow]![/yellow] {escape(warning)}")
+    for reason in plan.blocked:
+        console.print(f"[red]✗[/red] {escape(reason)}")
+
+
+def _show_outcome(outcome: plans_mod.Outcome, *, json_out: bool, done: str) -> None:
+    if json_out:
+        emit(outcome.to_dict())
+    else:
+        if outcome.ok:
+            console.print(f"[green]✓[/green] {done}")
+        for command, error in outcome.failed:
+            err.print(f"[red]✗[/red] {escape(' '.join(command))} — {escape(error)}")
+        for note in outcome.notes:
+            console.print(f"  {escape(note)}")
+        for warning in outcome.warnings:
+            console.print(f"[yellow]![/yellow] {escape(warning)}")
+    if not outcome.ok:
+        raise typer.Exit(code=1)
+
+
+def _change(action: str, service: str, compose: Optional[str], service_file: Optional[str],
+            stack: Optional[str], *, plan: bool, json_out: bool, yes: bool) -> None:
+    """``new`` and ``edit``: compute the plan, show it, confirm, execute it."""
+    if not plan and _tree_needs_root():
+        # Before reading stdin: the sudo re-exec inherits it unread.
+        ensure_root()
+    raw: dict[str, Any] = {"action": action, "service": service,
+                           "compose": _read_input(compose, "compose"),
+                           "service_yaml": _read_input(service_file, "service.yaml")}
+    if stack:
+        raw["stack"] = stack
+    try:
+        computed = plans_mod.compute(ctx.config, plans_mod.Request.from_dict(raw))
+    except plans_mod.PlanError as exc:
         if json_out:
             emit({"ok": False, "error": str(exc)})
             raise typer.Exit(code=2)
         err.print(f"[red]ERROR[/red] {exc}")
         raise typer.Exit(code=2)
 
-    if plan:
-        return _render_plan(commands, json_out=json_out, action="new", target=service)
+    if plan or computed.blocked:
+        if json_out:
+            emit({"plan": True, **computed.to_dict()})
+        else:
+            _show_plan(computed)
+            console.print("\n[dim]Nothing written.[/dim]")
+        raise typer.Exit(code=1 if computed.blocked else 0)
 
-    ensure_root()
     if not yes and not json_out:
-        _render_plan(commands, json_out=False, action="new", target=service)
-        if not typer.confirm("Create it?"):
+        _show_plan(computed)
+        if not typer.confirm("Apply?"):
             raise typer.Exit(code=1)
+    outcome = plans_mod.execute(ctx.config, computed)
+    verb = "Created" if action == "new" else "Updated"
+    _show_outcome(outcome, json_out=json_out, done=f"{verb} {computed.target}.")
+    if action == "new" and not json_out and outcome.ok:
+        console.print(f"  Then `clixz check {computed.target}`.")
 
-    try:
-        executed = create_service(ctx.config, CreateRequest(category, name))
-    except (CommandExecutionError, RuntimeError, OSError) as exc:
-        err.print(f"[red]ERROR[/red] {exc}")
-        raise typer.Exit(code=1)
 
-    if json_out:
-        return emit({"ok": True, "created": service, "commands": executed})
-    console.print(f"[green]✓[/green] Created {service}.")
-    console.print(f"  Edit {ctx.config.root_dir / category / name / COMPOSE}, "
-                  f"then `clixz check {service}`.")
+_COMPOSE_OPT = typer.Option("--compose", help="compose.yaml to write (- reads stdin).")
+_SERVICE_OPT = typer.Option("--service-file", help="service.yaml to write (- reads stdin).")
+
+
+@app.command("new", rich_help_panel=CHANGE)
+def new_cmd(
+    service: Annotated[str, typer.Argument(help="category/service")],
+    compose: Annotated[Optional[str], _COMPOSE_OPT] = None,
+    service_file: Annotated[Optional[str], _SERVICE_OPT] = None,
+    stack: Annotated[Optional[str], typer.Option(
+        "--stack", help="Komodo stack name (default: the service name).")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Create a service: its tree, a compose (yours or the hardened template), its stack."""
+    _change("new", service, compose, service_file, stack, plan=plan, json_out=json_out, yes=yes)
+
+
+@app.command("edit", rich_help_panel=CHANGE)
+def edit_cmd(
+    service: Annotated[str, typer.Argument(autocompletion=_complete_service)],
+    compose: Annotated[Optional[str], _COMPOSE_OPT] = None,
+    service_file: Annotated[Optional[str], _SERVICE_OPT] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Replace a service's compose.yaml and/or service.yaml; the old ones are archived."""
+    _change("edit", service, compose, service_file, None, plan=plan, json_out=json_out, yes=yes)
 
 
 @app.command("fix", rich_help_panel=CHANGE)
@@ -1004,6 +1117,327 @@ def category_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -
     console.print(table)
 
 
+# ─── plans ───────────────────────────────────────────────────────────────────
+
+def _plans_access(write: bool) -> None:
+    directory = ctx.config.state.plans_dir
+    mode = os.R_OK | os.X_OK | (os.W_OK if write else 0)
+    if directory.exists() and not os.access(directory, mode):
+        ensure_root()
+
+
+def _plan_or_exit(plan_id: str) -> plans_mod.Plan:
+    try:
+        return plans_mod.load(ctx.config, plan_id)
+    except plans_mod.PlanError as exc:
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=2)
+
+
+@plan_app.command("ls")
+def plan_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """The stored plans: pending, and expired within the last day."""
+    _plans_access(write=False)
+    found = plans_mod.list_plans(ctx.config)
+    if json_out:
+        return emit({"plans": [p.summary() for p in found]})
+    if not found:
+        console.print("[dim]No plan waiting.[/dim]")
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("ID", "ACTION", "TARGET", "STATUS", "FROM", "EXPIRES"):
+        table.add_column(column)
+    for plan in found:
+        status = plan.status()
+        table.add_row(plan.id or "", plan.action, plan.target,
+                      f"[dim]{status}[/dim]" if status == "expired" else status,
+                      plan.origin, plan.expires_at or "")
+    console.print(table)
+
+
+@plan_app.command("show")
+def plan_show_cmd(
+    plan_id: str,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """One plan: its commands, its diff, the compose lint."""
+    _plans_access(write=False)
+    plan = _plan_or_exit(plan_id)
+    if json_out:
+        return emit(plan.to_dict())
+    _show_plan(plan)
+
+
+@plan_app.command("apply")
+def plan_apply_cmd(
+    plan_id: str,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Apply a stored plan — once, and only if the disk still matches it."""
+    _plans_access(write=True)
+    plan = _plan_or_exit(plan_id)
+    if not yes and not json_out:
+        _show_plan(plan)
+        if not typer.confirm("Apply?"):
+            raise typer.Exit(code=1)
+    if _tree_needs_root():
+        ensure_root()
+    try:
+        outcome = plans_mod.apply(ctx.config, plan_id)
+    except plans_mod.PlanError as exc:
+        if json_out:
+            emit({"ok": False, "error": str(exc)})
+            raise typer.Exit(code=1)
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=1)
+    _show_outcome(outcome, json_out=json_out, done=f"Applied {plan_id}: {plan.action} {plan.target}.")
+
+
+@plan_app.command("drop")
+def plan_drop_cmd(plan_id: str) -> None:
+    """Delete a stored plan without applying it."""
+    _plans_access(write=True)
+    try:
+        plan = plans_mod.drop(ctx.config, plan_id)
+    except plans_mod.PlanError as exc:
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=2)
+    console.print(f"[green]✓[/green] Dropped {plan_id} ({plan.action} {escape(plan.target)}).")
+
+
+# ─── todo ────────────────────────────────────────────────────────────────────
+
+_STATE_LABEL = {"todo": "to do", "doing": "[yellow]doing[/yellow]",
+                "done": "[green]done[/green]", "archived": "[dim]archived[/dim]"}
+
+
+def _todo() -> TodoStore:
+    return TodoStore(ctx.config.state.todo_file, group=ctx.config.state.group)
+
+
+def _todo_call(action, json_out: bool = False):
+    """Run a todo operation; on a permission problem, retry through sudo."""
+    try:
+        return action()
+    except TodoError as exc:
+        if json_out:
+            emit({"ok": False, "error": str(exc)})
+        else:
+            err.print(f"[red]ERROR[/red] {escape(str(exc))}")
+        raise typer.Exit(code=2)
+    except PermissionError:
+        if os.geteuid() != 0:
+            err.print(f"[dim]{ctx.config.state.todo_file} is not writable by you "
+                      f"(members of {ctx.config.state.group} can) — going through sudo.[/dim]")
+            ensure_root()
+        raise
+
+
+def _print_item(item) -> None:
+    console.print(f"[bold]#{item.id} {escape(item.title)}[/bold]  {_STATE_LABEL[item.state]}")
+    console.print(f"[dim]created {item.created}, updated {item.updated}[/dim]")
+    if item.description:
+        console.print()
+        console.print(escape(item.description))
+
+
+@todo_app.command("ls")
+def todo_ls_cmd(
+    state: Annotated[Optional[list[str]], typer.Option(
+        "--state", help=f"Only these states ({', '.join(STATES)}); repeatable.")] = None,
+    all_states: Annotated[bool, typer.Option("--all", help="Every state, archived included.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """What is left to do (to do and doing, unless asked otherwise)."""
+    wanted = STATES if all_states else tuple(state or OPEN_STATES)
+    for name in wanted:
+        if name not in STATES:
+            err.print(f"[red]ERROR[/red] Unknown state '{name}' (known: {', '.join(STATES)}).")
+            raise typer.Exit(code=2)
+    items = [i for i in _todo_call(_todo().items, json_out) if i.state in wanted]
+    if json_out:
+        return emit({"items": [i.to_dict() for i in items], "count": len(items),
+                     "file": str(ctx.config.state.todo_file)})
+    if not items:
+        console.print("[dim]Nothing to do.[/dim]")
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("#", "STATE", "TITLE"):
+        table.add_column(column)
+    for item in items:
+        table.add_row(str(item.id), _STATE_LABEL[item.state], escape(item.title))
+    console.print(table)
+
+
+@todo_app.command("add")
+def todo_add_cmd(
+    title: str,
+    description: Annotated[str, typer.Option("--description", "-d")] = "",
+    state: Annotated[str, typer.Option("--state")] = "todo",
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Add an item."""
+    item = _todo_call(lambda: _todo().add(title, description, state), json_out)
+    if json_out:
+        return emit(item.to_dict())
+    console.print(f"[green]✓[/green] #{item.id} {escape(item.title)}")
+
+
+@todo_app.command("show")
+def todo_show_cmd(item_id: int, json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """One item, with its description."""
+    item = _todo_call(lambda: _todo().get(item_id), json_out)
+    if json_out:
+        return emit(item.to_dict())
+    _print_item(item)
+
+
+def _edit_in_editor(item) -> dict[str, str]:
+    import tempfile
+
+    import yaml
+
+    text = yaml.safe_dump({"title": item.title, "state": item.state,
+                           "description": item.description}, sort_keys=False, allow_unicode=True)
+    with tempfile.NamedTemporaryFile("w+", suffix=".yaml", encoding="utf-8") as f:
+        f.write(f"# todo #{item.id} — states: {', '.join(STATES)}\n{text}")
+        f.flush()
+        subprocess.run([os.environ.get("EDITOR", "nano"), f.name], check=False)
+        f.seek(0)
+        try:
+            edited = yaml.safe_load(f.read())
+        except yaml.YAMLError as exc:
+            err.print(f"[red]ERROR[/red] Not valid YAML, nothing changed: {exc}")
+            raise typer.Exit(code=2)
+    if not isinstance(edited, dict):
+        err.print("[red]ERROR[/red] Expected title, state and description; nothing changed.")
+        raise typer.Exit(code=2)
+    return {k: str(edited[k]) for k in ("title", "state", "description") if edited.get(k) is not None}
+
+
+@todo_app.command("edit")
+def todo_edit_cmd(
+    item_id: int,
+    title: Annotated[Optional[str], typer.Option("--title")] = None,
+    description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
+    state: Annotated[Optional[str], typer.Option("--state")] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Change an item. Without an option, open it in $EDITOR."""
+    store = _todo()
+    if title is None and description is None and state is None:
+        changes = _edit_in_editor(_todo_call(lambda: store.get(item_id), json_out))
+    else:
+        changes = {k: v for k, v in (("title", title), ("description", description),
+                                     ("state", state)) if v is not None}
+    item = _todo_call(lambda: store.update(item_id, **changes), json_out)
+    if json_out:
+        return emit(item.to_dict())
+    console.print(f"[green]✓[/green] #{item.id} {escape(item.title)}  {_STATE_LABEL[item.state]}")
+
+
+def _set_state(item_id: int, state: str) -> None:
+    item = _todo_call(lambda: _todo().update(item_id, state=state))
+    console.print(f"[green]✓[/green] #{item.id} {escape(item.title)}  {_STATE_LABEL[item.state]}")
+
+
+@todo_app.command("start")
+def todo_start_cmd(item_id: int) -> None:
+    """Mark an item as in progress."""
+    _set_state(item_id, "doing")
+
+
+@todo_app.command("done")
+def todo_done_cmd(item_id: int) -> None:
+    """Mark an item as done."""
+    _set_state(item_id, "done")
+
+
+@todo_app.command("archive")
+def todo_archive_cmd(item_id: int) -> None:
+    """Archive an item: kept, but out of every listing but --all."""
+    _set_state(item_id, "archived")
+
+
+@todo_app.command("rm")
+def todo_rm_cmd(
+    item_id: int,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Delete an item for good (archive keeps it)."""
+    store = _todo()
+    item = _todo_call(lambda: store.get(item_id), json_out)
+    if not yes and not json_out and not typer.confirm(f"Delete #{item.id} {item.title}?"):
+        raise typer.Exit(code=1)
+    removed = _todo_call(lambda: store.remove(item_id), json_out)
+    if json_out:
+        return emit({"ok": True, "removed": removed.to_dict()})
+    console.print(f"[green]✓[/green] Deleted #{removed.id} {escape(removed.title)}")
+
+
+# ─── daemon ──────────────────────────────────────────────────────────────────
+
+@daemon_app.command("install")
+def daemon_install_cmd(
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would run, run nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Write the units this version ships, and (re)start what needs it."""
+    if plan:
+        commands = daemon_mod.install(ctx.config, dry_run=True)
+        return _render_plan(commands, json_out=json_out, action="daemon install",
+                            target=str(daemon_mod.UNIT_DIR))
+    ensure_root()
+    try:
+        commands = daemon_mod.install(ctx.config)
+    except (CommandExecutionError, OSError) as exc:
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=1)
+    if json_out:
+        return emit({"ok": True, "commands": commands})
+    for command in commands:
+        console.print(f"  {escape(' '.join(command))}")
+    console.print(f"[green]✓[/green] clixz {__version__}: units in place.")
+
+
+@daemon_app.command("status")
+def daemon_status_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """Whether the installed units match this version, and whether they run."""
+    payload = daemon_mod.status(ctx.config)
+    payload["version"] = __version__
+    if json_out:
+        return emit(payload)
+    table = Table(box=None, pad_edge=False)
+    for column in ("UNIT", "FILE", "RUNNING"):
+        table.add_column(column)
+    state_label = {"ok": "[green]up to date[/green]", "missing": "[red]not installed[/red]",
+                   "differs": "[yellow]differs from the package[/yellow]"}
+    for unit in payload["units"]:
+        running = {True: "[green]yes[/green]", False: "[red]no[/red]", None: "[dim]—[/dim]"}
+        table.add_row(unit["name"], state_label[unit["state"]], running[unit["active"]])
+    console.print(table)
+    if payload["mcpd_stale"]:
+        console.print("[yellow]![/yellow] clixz-mcpd started before this version was installed: "
+                      "`sudo clixz daemon restart`")
+    for name in payload["retired_present"]:
+        console.print(f"[yellow]![/yellow] {name} is from an earlier version: "
+                      "`sudo clixz daemon install` removes it")
+    if any(u["state"] != "ok" for u in payload["units"]):
+        console.print("[dim]`sudo clixz daemon install` brings them in line.[/dim]")
+
+
+@daemon_app.command("restart")
+def daemon_restart_cmd() -> None:
+    """Restart clixz-mcpd (clixz-apply needs none: one process per request)."""
+    ensure_root()
+    done = subprocess.run(["systemctl", "restart", daemon_mod.MCPD_UNIT], check=False)
+    if done.returncode != 0:
+        raise typer.Exit(code=done.returncode)
+    console.print(f"[green]✓[/green] Restarted {daemon_mod.MCPD_UNIT}.")
+
+
 @app.command("config", rich_help_panel=ITSELF)
 def config_cmd(
     edit: Annotated[bool, typer.Option("--edit", help="Open the config in $EDITOR.")] = False,
@@ -1088,16 +1522,18 @@ def config_cmd(
         console.print("[dim]Run `clixz config --migrate` for a v2 translation.[/dim]")
 
 
-MCPD_UNIT_FILE = Path("/etc/systemd/system/clixz-mcpd.service")
+MCPD_UNIT_FILE = daemon_mod.UNIT_DIR / daemon_mod.MCPD_UNIT
 
 # What stays out of reach whatever the caller sends. Not derived from code: it
 # is the list of things a reader would otherwise have to infer from an absence.
 MCP_NEVER = (
-    "applying a plan — new, fix, rm, category add and repo add/rm only ever run with --plan",
-    "rm --force, the one destructive path, which refuses --plan and --json",
-    "writing anything: manifest is a dry run, exposed reads the snapshot root wrote",
-    "config --edit, rules --edit, meta --scaffold, image add/rm, upgrade",
-    "the contents of .env files (root-owned, outside the daemon's groups)",
+    "rm --force and repo rm, the two destructive paths: they refuse --plan and --json",
+    "applying a category or repo plan: only service plans (new, edit, fix, rm) are applied",
+    "a plan with an error-level lint finding that ignore.yaml does not accept: refused",
+    "writing the config, lint.yaml, ignore.yaml or the units: outside clixz-apply's sandbox",
+    "the contents of .env files: never read; `new` creates an empty one, Komodo fills it",
+    "deploying: a new service's stack is created in Komodo, never deployed",
+    "config --edit, rules --edit, meta --scaffold, image add/rm, upgrade, daemon install",
 )
 
 
@@ -1112,7 +1548,7 @@ def _unit_setting(text: str, key: str) -> list[str]:
 
 @app.command("mcp", rich_help_panel=ITSELF)
 def mcp_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
-    """What the MCP gateway (clixz-mcpd) can run and read, and what it cannot."""
+    """What the MCP gateway (clixz-mcpd) runs, relays to clixz-apply, and never does."""
     payload: dict[str, Any] = mcpd_mod.access()
     payload["never"] = list(MCP_NEVER)
     socket_path = Path(payload["socket"])
@@ -1149,13 +1585,15 @@ def mcp_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
     console.print(f"[bold]Unit[/bold]     {unit_label}")
     console.print(f"[bold]Account[/bold]  {account or '[dim]unknown[/dim]'}")
 
-    for title, key in (("Reads — run as they are", "read"),
-                       ("Mutations — planned, never applied", "plan")):
+    for title, key, column, field in (
+            ("Reads — the CLI, unprivileged", "read", "RUNS", "runs"),
+            ("Planned only — never applied", "plan", "RUNS", "runs"),
+            ("Relayed to clixz-apply (root, one process per request)", "relay", "DOES", "does")):
         table = Table(box=None, pad_edge=False, title=title, title_justify="left")
         table.add_column("REQUEST")
-        table.add_column("RUNS")
+        table.add_column(column)
         for row in payload[key]:
-            table.add_row(row["request"], escape(row["runs"]))
+            table.add_row(row["request"], escape(row[field]))
         console.print()
         console.print(table)
 

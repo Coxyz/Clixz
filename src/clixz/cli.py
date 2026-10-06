@@ -50,6 +50,7 @@ from .meta import (
     declared_urls,
     manifest_json,
     scaffold_template,
+    write_manifest,
 )
 from .policy import (
     COMPOSE,
@@ -844,9 +845,7 @@ def manifest_cmd(
         return
 
     ensure_root()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(manifest_json(result.manifest), encoding="utf-8")
-    subprocess.run(["chmod", "644", str(destination)], check=False)
+    result = write_manifest(ctx.config)
 
     if json_out:
         return emit({"ok": True, "destination": str(destination),

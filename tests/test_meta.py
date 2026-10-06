@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,13 +10,14 @@ from pathlib import Path
 import yaml
 
 from clixz.config import parse_config
-from clixz.meta import build_manifest, declared_urls, parse_meta, scaffold_template
+from clixz.meta import build_manifest, declared_urls, parse_meta, scaffold_template, write_manifest
 
 
 def _config(root: Path) -> object:
     return parse_config({
         "root_dir": str(root),
         "categories": {"apps": {"user": "root", "group": "root"}},
+        "api": {"manifest": str(root / "etc" / "manifest.json")},
     })
 
 
@@ -76,3 +78,33 @@ class ManifestTests(unittest.TestCase):
             "public": False, "url": "https://komodo.coxyz.fr",
         })
         self.assertIn("apps/hidden", declared_urls(self.config))
+
+
+class WriteManifestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.config = _config(self.root)
+        self.target = self.root / "etc" / "manifest.json"
+        _service(self.root, "public-one", {
+            "schema": 1, "name": "Public", "icon": "🌐", "description": "d", "public": True,
+        })
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_writes_the_public_services_readable_by_everyone(self) -> None:
+        result = write_manifest(self.config)
+        self.assertEqual([], result.errors)
+        written = json.loads(self.target.read_text(encoding="utf-8"))
+        self.assertEqual(["public-one"], [s["key"] for s in written["services"]])
+        self.assertEqual(0o644, self.target.stat().st_mode & 0o777)
+
+    def test_an_invalid_descriptor_leaves_the_previous_manifest_in_place(self) -> None:
+        self.target.parent.mkdir(parents=True)
+        self.target.write_text("previous", encoding="utf-8")
+        _service(self.root, "broken", {"schema": 1, "public": "yes"})
+        result = write_manifest(self.config)
+        self.assertTrue(result.errors)
+        self.assertEqual("previous", self.target.read_text(encoding="utf-8"))
+

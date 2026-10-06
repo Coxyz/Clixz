@@ -300,6 +300,25 @@ def manifest_json(manifest: dict[str, Any]) -> str:
     return json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
 
 
+def write_manifest(config: Config) -> ManifestResult:
+    """Build the manifest and write it where the config says, if it is clean.
+
+    An invalid descriptor leaves the previous manifest in place: the API keeps
+    serving the last good state rather than a list with a service missing.
+    Written in place and ``644``: the file may be bind-mounted read-write into
+    the applier's sandbox, which a rename would break, and the API container
+    reads it as another user.
+    """
+    result = build_manifest(config)
+    if result.errors:
+        return result
+    destination = config.resolved_manifest_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(manifest_json(result.manifest), encoding="utf-8")
+    destination.chmod(0o644)
+    return result
+
+
 def declared_urls(config: Config) -> dict[str, str]:
     """``{"category/service": url}`` for every descriptor that declares one.
 

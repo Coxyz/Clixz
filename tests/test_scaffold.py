@@ -12,7 +12,13 @@ from pathlib import Path
 import yaml
 
 from clixz.config import parse_config
-from clixz.scaffold import CreateRequest, create_service, plan_create, validate_service_name
+from clixz.scaffold import (
+    CreateRequest,
+    create_service,
+    edit_service,
+    plan_create,
+    validate_service_name,
+)
 
 
 def _owner() -> str:
@@ -88,3 +94,62 @@ class CreateTests(unittest.TestCase):
     def test_refuses_an_unknown_category(self) -> None:
         with self.assertRaises(KeyError):
             create_service(self.config, CreateRequest("nope", "demo"))
+
+
+_GIVEN_COMPOSE = "services:\n  demo:\n    image: nginx:1.27\n"
+_GIVEN_SERVICE = "schema: 1\nname: Demo\nicon: x\ndescription: d\npublic: false\n"
+
+
+class GivenContentTests(unittest.TestCase):
+    def test_given_files_are_written_as_they_are(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            create_service(_config(root), CreateRequest("apps", "demo", compose=_GIVEN_COMPOSE,
+                                                        service_yaml=_GIVEN_SERVICE))
+            svc = root / "apps" / "demo"
+            self.assertEqual(_GIVEN_COMPOSE, (svc / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(_GIVEN_SERVICE, (svc / "service.yaml").read_text(encoding="utf-8"))
+
+
+class EditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.config = _config(self.root)
+        create_service(self.config, CreateRequest("apps", "demo"))
+        self.svc = self.root / "apps" / "demo"
+        self.before = (self.svc / "compose.yaml").read_text(encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_edit_replaces_the_compose_and_keeps_its_mode(self) -> None:
+        edit_service(self.config, "apps", "demo", compose=_GIVEN_COMPOSE, service_yaml=None)
+        self.assertEqual(_GIVEN_COMPOSE, (self.svc / "compose.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(0o640, (self.svc / "compose.yaml").stat().st_mode & 0o777)
+
+    def test_edit_archives_the_previous_version(self) -> None:
+        edit_service(self.config, "apps", "demo", compose=_GIVEN_COMPOSE, service_yaml=None)
+        saved = list((self.root / ".archive" / "apps" / "demo" / "updates").iterdir())
+        self.assertEqual(1, len(saved))
+        self.assertTrue(saved[0].name.endswith("-compose.yaml"))
+        self.assertEqual(self.before, saved[0].read_text(encoding="utf-8"))
+
+    def test_edit_leaves_the_file_it_was_not_given_alone(self) -> None:
+        service_before = (self.svc / "service.yaml").read_text(encoding="utf-8")
+        edit_service(self.config, "apps", "demo", compose=_GIVEN_COMPOSE, service_yaml=None)
+        self.assertEqual(service_before, (self.svc / "service.yaml").read_text(encoding="utf-8"))
+
+    def test_a_dry_run_lists_the_commands_and_writes_nothing(self) -> None:
+        commands = edit_service(self.config, "apps", "demo", compose=_GIVEN_COMPOSE,
+                                service_yaml=_GIVEN_SERVICE, dry_run=True)
+        self.assertEqual(self.before, (self.svc / "compose.yaml").read_text(encoding="utf-8"))
+        self.assertFalse((self.root / ".archive").exists())
+        written = [c[1] for c in commands if c[0] == "write_file"]
+        self.assertEqual([str(self.svc / "compose.yaml"), str(self.svc / "service.yaml")], written)
+        self.assertIn("cp", [c[0] for c in commands])
+
+    def test_editing_a_missing_service_is_refused(self) -> None:
+        with self.assertRaises(RuntimeError):
+            edit_service(self.config, "apps", "ghost", compose=_GIVEN_COMPOSE, service_yaml=None)
+

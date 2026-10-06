@@ -265,14 +265,27 @@ def lint_service(name: str, body: dict, svc_dir: Path | None = None,
 def lint_compose(path: Path, svc_dir: Path | None = None,
                  rules: LintRules | None = None) -> list[LintFinding]:
     """Lint every service in a compose file."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    return lint_text(text, svc_dir, rules)
+
+
+def lint_text(text: str, svc_dir: Path | None = None,
+              rules: LintRules | None = None) -> list[LintFinding]:
+    """Lint a compose given as text — the file on disk, or the one a plan proposes."""
     rules = rules or LintRules()
     whole = _Findings("", rules)
-    doc = load_compose(path)
-    if doc is None:
-        if not path.is_file() or not path.read_text(encoding="utf-8").strip():
-            whole.add("compose-empty", "compose.yaml is empty")
-        else:
-            whole.add("compose-invalid", "compose.yaml is not readable YAML")
+    if not text.strip():
+        whole.add("compose-empty", "compose.yaml is empty")
+        return whole.items
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        doc = None
+    if not isinstance(doc, dict):
+        whole.add("compose-invalid", "compose.yaml is not readable YAML")
         return whole.items
 
     services = doc.get("services")

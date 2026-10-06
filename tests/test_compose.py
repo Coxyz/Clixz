@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from clixz.compose import lint_compose, lint_service, summarize, template
+from clixz.compose import lint_compose, lint_service, lint_text, summarize, template
 from clixz.config import parse_config
 
 
@@ -148,3 +148,34 @@ class FileTests(unittest.TestCase):
                 "    ports: ['80:80']\n", encoding="utf-8")
             image, ports, names = summarize(path)
             self.assertEqual(("nginx:1", ["80:80"], ["web"]), (image, ports, names))
+
+
+class LintTextTests(unittest.TestCase):
+    """Linting a compose that is not on disk yet — what a plan proposes."""
+
+    def _rules(self, findings) -> list[str]:
+        return [f.rule for f in findings]
+
+    def test_empty_text_is_compose_empty(self) -> None:
+        self.assertEqual(["compose-empty"], self._rules(lint_text("  \n")))
+
+    def test_invalid_yaml_is_compose_invalid(self) -> None:
+        self.assertEqual(["compose-invalid"], self._rules(lint_text("services: [oops\n")))
+
+    def test_a_list_at_the_top_is_compose_invalid_not_a_crash(self) -> None:
+        self.assertEqual(["compose-invalid"], self._rules(lint_text("- a\n- b\n")))
+
+    def test_services_as_a_list_is_compose_invalid(self) -> None:
+        self.assertEqual(["compose-invalid"], self._rules(lint_text("services: [a, b]\n")))
+
+    def test_a_service_body_that_is_not_a_mapping_is_not_a_crash(self) -> None:
+        findings = lint_text("services:\n  demo: just-a-string\n")
+        self.assertIsInstance(findings, list)
+
+    def test_same_findings_as_lint_compose_on_the_same_text(self) -> None:
+        text = "services:\n  demo:\n    image: x:latest\n    privileged: true\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "compose.yaml"
+            path.write_text(text, encoding="utf-8")
+            self.assertEqual(lint_compose(path, Path(tmp)), lint_text(text, Path(tmp)))
+

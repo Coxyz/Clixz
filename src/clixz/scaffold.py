@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import compose as compose_mod
+from .archive import snapshot_file
 from .config import Config
 from .meta import SERVICE_FILENAME, scaffold_template
 from .policy import COMPOSE, ENV_FILE, SERVICE_DIRS
@@ -25,6 +26,10 @@ SERVICE_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 class CreateRequest:
     category: str
     service: str
+    # The files to write. None means the template: the hardened compose, the
+    # commented service.yaml. A plan prepared through the MCP carries both.
+    compose: str | None = None
+    service_yaml: str | None = None
 
 
 def validate_service_name(name: str) -> None:
@@ -84,12 +89,14 @@ def _create(config: Config, req: CreateRequest, runner: CommandRunner) -> None:
 
     make_file(
         svc_path / COMPOSE,
-        compose_mod.template(config, req.category, req.service),
+        req.compose if req.compose is not None
+        else compose_mod.template(config, req.category, req.service),
         file_rule.owner or cat.owner, file_rule.mode,
     )
     make_file(
         svc_path / SERVICE_FILENAME,
-        scaffold_template(req.category, req.service),
+        req.service_yaml if req.service_yaml is not None
+        else scaffold_template(req.category, req.service),
         file_rule.owner or cat.owner, file_rule.mode,
     )
     make_file(
@@ -97,3 +104,38 @@ def _create(config: Config, req: CreateRequest, runner: CommandRunner) -> None:
         f"# {req.category}/{req.service} — secrets. Never committed, never in service.yaml.\n",
         env_rule.owner or cat.owner, env_rule.mode,
     )
+
+
+def edit_service(
+    config: Config, category: str, service: str, *, compose: str | None,
+    service_yaml: str | None, dry_run: bool = False,
+) -> list[list[str]]:
+    """Replace ``compose.yaml`` and/or ``service.yaml``; return the commands.
+
+    The previous version of each replaced file is copied under
+    ``.archive/<category>/<service>/updates/`` first — nothing is ever lost to
+    an edit. ``.env`` is not editable here: Komodo owns its contents.
+    """
+    cat = config.category(category)
+    svc_path = config.root_dir / category / service
+    if not svc_path.is_dir():
+        raise RuntimeError(f"No such service: {category}/{service}")
+
+    file_rule = config.rule("file")
+    runner = CommandRunner(dry_run=dry_run)
+    commands: list[list[str]] = []
+    for name, content in ((COMPOSE, compose), (SERVICE_FILENAME, service_yaml)):
+        if content is None:
+            continue
+        path = svc_path / name
+        if path.exists():
+            snapshot = snapshot_file(config, category, service, path, dry_run=dry_run)
+            commands += [["mkdir", "-p", str(snapshot.parent)],
+                         ["cp", "-p", str(path), str(snapshot)]]
+        done = len(runner.executed)
+        runner.write_file(path, content)
+        runner.run(["chown", file_rule.owner or cat.owner, str(path)])
+        runner.run(["chmod", file_rule.mode, str(path)])
+        commands += runner.executed[done:]
+    return commands
+

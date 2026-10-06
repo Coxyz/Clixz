@@ -377,3 +377,24 @@ qui a changé depuis, et qui contredit ou complète ce qui précède :
   seul.
 
 Les phases 0, 2 et 3 du §6 sont suivies dans `docs/TODO-OPXYZ.md`.
+
+## 13. 2.3 — la décision du §9 renversée (2026-10-06)
+
+« Le MCP produit le plan, l'humain exécute au clavier » ne tient plus : l'IA
+doit pouvoir créer et modifier un service sans que l'opérateur passe par le
+terminal. Ce qui a changé, et ce qui reste :
+
+- l'exécution passe par **`clixz-apply`**, un processus root démarré par
+  systemd pour une requête et qui s'arrête avec elle — pas de démon root
+  permanent, pas de code périmé après une mise à jour ;
+- l'humain valide toujours, mais **dans le client Claude** (`plan_apply`,
+  laissé sur « demander à chaque fois ») ;
+- un plan n'est enregistré que par root, recalculé avant d'être appliqué, et
+  refusé s'il porte une erreur de lint non acceptée dans `ignore.yaml` — que
+  l'IA ne peut pas modifier ;
+- `exposed` lit la base du proxy en direct par ce même processus : le timer
+  `clixz-snapshot` disparaît ;
+- les unités sont dans le paquet (`clixz daemon install`), `deploy/` disparaît.
+
+Spécification : `docs/specs/2026-10-06-clixz-2.3.md`.
+

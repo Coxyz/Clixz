@@ -36,6 +36,24 @@ So 2.0 moves the effort:
 `docs/REFONTE.md` records the reasoning and the decisions; `docs/TODO-OPXYZ.md`
 lists the host-side actions the audit produced.
 
+## What changed in 2.3
+
+2.0 made the MCP side read-only: the model proposed a plan, the operator typed
+the command. 2.3 lets a plan prepared through the MCP server be **applied**
+there, once the operator approves the `plan_apply` call in the Claude client —
+without bringing back a long-running root daemon:
+
+| 2.2 | 2.3 |
+|---|---|
+| Mutations planned, then typed by hand | Service plans (`new`, `edit`, `fix`, `rm`) stored by root and applied on approval |
+| `clixz new` writes a template | `clixz new`/`edit` also take your compose and service.yaml, and refuse an unaccepted lint error |
+| A timer copied the proxy database every 15 min | `exposed` reads it at the moment of the question |
+| Units copied by hand from `deploy/` | `clixz daemon install` writes the units the package ships |
+| — | `clixz todo`: what is left to do, shared with the AI |
+| — | A new service's stack is created in Komodo (not deployed) |
+
+The design is in `docs/specs/2026-10-06-clixz-2.3.md`.
+
 ## Install
 
 Published on PyPI as [`clixz`](https://pypi.org/project/clixz/). Write commands
@@ -43,6 +61,7 @@ need root (`chown`/`chmod`), so install it system-wide:
 
 ```bash
 sudo sh -c 'umask 022 && pipx install --global clixz'
+sudo clixz daemon install   # the MCP gateway and the root applier (optional)
 sudo clixz upgrade          # every later upgrade
 ```
 
@@ -50,9 +69,11 @@ The `umask` matters on a hardened host: with `UMASK 027` in `/etc/login.defs`,
 pipx and uv create an environment only root can read, and `clixz` then fails
 with "permission denied" for everyone else — including `clixz-mcpd`.
 `clixz upgrade` sets it for you and calls the installer that put clixz there
-(pipx or uv), so there is nothing to remember after the first install. When the
-version changed it also restarts `clixz-mcpd`, which would otherwise keep
-serving the code it loaded at start.
+(pipx or uv), so there is nothing to remember after the first install. It asks
+PyPI for the latest release and installs it with caching off — a release minutes
+old is otherwise not seen — then runs `clixz daemon install` from the new
+version. `clixz-mcpd` also restarts by itself within 30 s of any upgrade, by
+whatever route.
 
 Write commands re-exec themselves through `sudo` automatically — set
 `CLIXZ_NO_SUDO=1` to opt out (containers, CI, and `clixz-mcpd`, which must never
@@ -68,14 +89,22 @@ clixz ls [-C apps]              # services with image and published ports
 clixz ls --archived
 clixz show apps/atuin           # permissions, compose lint, paths, one screen
 clixz check [service]           # audit + lint. exit 1 on a permission error
-clixz exposed [--snapshot]      # what NPM publishes vs what service.yaml declares
+clixz exposed                   # what NPM publishes vs what service.yaml declares (sudo)
 clixz rules                     # the compose rules in effect, and what is ignored
 
 # write  (each accepts --plan: prints what it would do, writes nothing)
-clixz new apps/myapp            # tree + hardened compose template + .env + service.yaml
+clixz new apps/myapp [--compose F] [--service-file F]   # tree + compose + .env + service.yaml
+clixz edit apps/myapp --compose F                       # the old file goes to .archive/
 clixz fix [service]             # repair ownership and modes
 clixz rm apps/myapp             # archive under .archive/  (--force deletes, TTY only)
 clixz category add media        # system account + directory + config entry
+clixz plan ls|show|apply|drop   # plans prepared through the MCP server
+
+# to do — the same list the AI reads and writes
+clixz todo ls [--all]           # todo and doing, by default
+clixz todo add "title" -d "description"
+clixz todo start|done|archive|rm <id>
+clixz todo edit <id>            # $EDITOR, or --title / -d / --state
 
 # housekeeping
 clixz meta [service] [--scaffold]
@@ -85,8 +114,9 @@ clixz repo add|rm|ls <name>     # git checkouts under /opt/repos (add --url clon
 clixz category ls
 clixz rules --edit | --edit-ignore
 clixz config [--migrate] [--edit]
-clixz mcp                       # what the MCP gateway can run and read
-clixz upgrade [--plan]          # upgrade clixz itself, world-readable
+clixz mcp                       # what the MCP gateway runs, relays, and never does
+clixz daemon install|status|restart
+clixz upgrade [--plan]          # latest release, no cache, then its units
 ```
 
 Every command takes `--json` for machine-readable output. That is what
@@ -126,10 +156,14 @@ npm:
   database: /srv/docker/network/npm/data/app/database.sqlite
 ```
 
-Two files are generated next to the config rather than inside a service, because
-they describe the whole tree: `manifest.json` (`clixz manifest`; the container
-that serves it mounts it read-only from there) and `npm-hosts.json`
-(`clixz exposed --snapshot`, see the MCP gateway below).
+`manifest.json` is generated next to the config rather than inside a service,
+because it describes the whole tree; the container that serves it mounts it
+read-only from there. `clixz manifest` writes it, and so does every applied plan
+that touches a `service.yaml`.
+
+clixz's own state — the stored plans and the todo — lives in `/var/lib/clixz`
+(`state: {dir, group}`): `plans/` is root's alone, `todo.yaml` is readable by
+everyone and writable by the `group` (default `docker`, the operators).
 
 ### Compose rules and accepted exceptions
 
@@ -201,33 +235,46 @@ clears them with `setfacl -b`.
 
 ## The MCP gateway
 
-`clixz-mcpd` is a single unprivileged daemon on a Unix socket, consumed by the
-MCP container. Read verbs run as-is; mutating verbs are forwarded to the CLI
-with `--plan`, which prints the commands it would run and exits without writing.
-The unit carries `ReadOnlyPaths=/srv/docker`, so this is not a policy the daemon
-enforces on itself — it is a thing it cannot do.
+Two halves, one boundary:
 
-The approval loop still exists. It goes through the keyboard: the model proposes
-a plan, you run `sudo clixz fix …`.
+- **`clixz-mcpd`** — unprivileged, on a Unix socket mounted into the MCP
+  container. Reads run the CLI, here. The unit keeps `ProtectSystem=strict` and
+  `ReadOnlyPaths=/srv/docker`: it writes nothing itself.
+- **`clixz-apply`** — root, started by systemd **for one request**
+  (`clixz-apply.socket`, `Accept=yes`) and gone with it. Only `clixz-mcpd` can
+  reach its socket. It computes and stores service plans, applies them, reads
+  the proxy database live for `exposed`, and writes the todo. It validates every
+  field again, and its sandbox can write the tree, its state directory and the
+  manifest — not the config, not `lint.yaml`, not `ignore.yaml`.
+
+A service plan is the unit of trust:
+
+1. the model asks for it (`service_create`, `service_update`, `service_fix`,
+   `service_delete`); clixz computes it — commands, diff, lint — and refuses it
+   when the result carries an error-level lint finding that `ignore.yaml` does
+   not accept;
+2. root stores it under a random id in `/var/lib/clixz/plans/` (0700): nothing
+   else can write a plan, so an id is proof clixz computed it;
+3. the operator approves `plan_apply` in the Claude client;
+4. clixz recomputes it against the disk, refuses if the service changed in
+   between, applies it once, refreshes the manifest, and — for a new service —
+   creates its stack in Komodo (configured, not deployed).
+
+`.env` is never written by a plan, `rm --force` and `repo rm` stay at the
+keyboard, and category and repo plans are only ever printed. `clixz mcp` lists
+exactly what each half accepts.
 
 ```bash
-sudo cp deploy/clixz-mcpd.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now clixz-mcpd
+sudo clixz daemon install    # renders the units from the config, starts what is new
+clixz daemon status          # are the installed units this version's? are they running?
 ```
 
-The daemon also lists repos and categories, prints the rules, and plans
-`category add`, `repo add` and `repo rm` — planned, like every other mutation.
+The gateway's groups are the categories' groups, computed at install time: after
+`clixz category add`, run `sudo clixz daemon install` again.
 
-`clixz exposed` reads a database only root can open, so the daemon cannot run it
-for real. Instead root copies the proxy hosts to `npm-hosts.json` on a timer, and
-an unprivileged `clixz exposed` falls back on that copy and says how old it is:
-
-```bash
-sudo cp deploy/clixz-snapshot.service deploy/clixz-snapshot.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now clixz-snapshot.timer
-```
-
-The same timer refreshes `manifest.json`.
+To create stacks in Komodo, give clixz an API key of a Komodo service user
+(non-admin) in `/etc/clixz/komodo.yaml` (`key:`, `secret:`, root 0600) and add a
+`komodo:` section to the config (see `default_config.yaml`).
 
 ## Development
 

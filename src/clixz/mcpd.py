@@ -1,63 +1,77 @@
-"""The single gateway between the MCP container and the CLI.
+"""The single gateway between the MCP container and the host.
 
 v1 had two daemons: ``clixz-runnerd`` (unprivileged, read-only) relayed
-mutations to ``clixz-admind`` (root, CAP_CHOWN/CAP_FOWNER/CAP_DAC_OVERRIDE) over
-a second socket, with a plan store and a SHA-256 binding between what a human
-approved and what got written.
+mutations to ``clixz-admind`` (root, CAP_CHOWN/CAP_FOWNER/CAP_DAC_OVERRIDE),
+a long-running root process reachable from an internet-published MCP server.
+2.0 removed it: mutations could only be *planned*, and the operator typed the
+command.
 
-The audit of 2026-08-29 found that ``mcp.coxyz.fr`` was published on the
-internet. That made the chain internet → bearer token → runnerd → a root daemon
-with DAC_OVERRIDE, to spare the only human on the machine from typing
-``sudo clixz fix``. The trade was not worth it, so ``admind`` is gone.
-
-What is left cannot write. Not "is not supposed to" — cannot: every mutating
-verb is forwarded to the CLI with ``--plan``, which prints the commands it would
-run and exits without touching anything, and the unit carries
-``ReadOnlyPaths=/srv/docker``. The approval loop still exists; it goes through
-the keyboard.
+2.3 brings application back, differently. This daemon still cannot write — the
+unit keeps ``ProtectSystem=strict`` and ``ReadOnlyPaths=/srv/docker`` — and it
+holds no privilege. What it gained is a second socket to talk to:
+``clixz-apply``, a root process systemd starts for one request and that exits
+with it. Service plans, applies, the plan store, the live ``exposed`` and the
+todo writes go there; reads still run the CLI here, unprivileged. The applier
+validates everything again: this daemon is a filter for clarity, not the
+security boundary on that path.
 
 Protocol — one JSON object per connection, newline-terminated::
 
-    {"cmd": "check", "service": "bitwarden"}
-    {"cmd": "plan", "action": "fix", "service": "apps/atuin"}
-    {"cmd": "plan", "action": "category-add", "name": "media"}
-    {"cmd": "plan", "action": "repo-add", "name": "myrepo", "url": "https://…"}
+    {"cmd": "check", "service": "bitwarden"}                  → CLI, here
+    {"cmd": "plan", "action": "edit", "service": "apps/atuin",
+     "compose": "services: …"}                                → clixz-apply
+    {"cmd": "apply", "plan_id": "0a1b2c3d"}                   → clixz-apply
+    {"cmd": "plan", "action": "category-add", "name": "media"} → CLI --plan, here
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
 import json
 import os
 import re
+import socket
 import socketserver
 import subprocess
 import sys
+import threading
+import time
+from typing import Any
 
+from . import __version__
 from .category import ACCOUNT_NAME_RE, CATEGORY_NAME_RE
 from .config import env
+from .plans import MAX_COMPOSE, MAX_SERVICE_YAML, PLAN_ID_RE, STACK_RE
 from .repo import REPO_NAME_RE, REPO_URL_RE
+from .todo import STATES
 
 CLIXZ_BIN = env("BIN", "/usr/local/bin/clixz")
 SOCKET_PATH = env("MCPD_SOCKET", "/run/clixz-mcpd/clixz-mcpd.sock")
+APPLY_SOCKET = env("APPLY_SOCKET", "/run/clixz-apply.sock")
 TIMEOUT = int(env("MCPD_TIMEOUT", "60"))
+APPLY_TIMEOUT = int(env("APPLY_TIMEOUT", "120"))
 MAX_OUTPUT = 256 * 1024
-MAX_REQUEST = 64 * 1024
+MAX_REQUEST = 512 * 1024
+MAX_RESPONSE = 4 * 1024 * 1024
 
 _SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?$")
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
-# Read-only verbs, run as-is.
-READ_COMMANDS = ("ls", "show", "check", "manifest", "exposed", "config", "rules",
-                 "repos", "categories")
-# Mutating verbs on a service. Never run as themselves — always with --plan,
-# which prints what would happen and writes nothing.
-PLAN_ACTIONS = ("new", "fix", "rm")
-# Mutating verbs on something else than a service, planned the same way.
+# Read-only verbs, run as-is through the CLI, unprivileged.
+READ_COMMANDS = ("ls", "show", "check", "manifest", "config", "rules", "repos",
+                 "categories", "todo", "todo-show")
+# Service plans: computed, stored and applied by clixz-apply.
+APPLIED_ACTIONS = ("new", "edit", "fix", "rm")
+# Mutations on something else than a service: planned by the CLI, never applied.
 NAMED_PLAN_ACTIONS = {
     "category-add": ["category", "add"],
     "repo-add": ["repo", "add"],
     "repo-rm": ["repo", "rm"],
 }
+# Everything else that goes to clixz-apply as it is.
+RELAYED = ("plans", "plan-show", "plan-drop", "apply", "exposed",
+           "todo-add", "todo-edit", "todo-rm")
 # Read verbs that are a subcommand of a group.
 _GROUP_READS = {"repos": ["repo", "ls"], "categories": ["category", "ls"]}
 
@@ -89,6 +103,26 @@ def _checked(req: dict, key: str, pattern: re.Pattern[str], *, required: bool) -
     return value
 
 
+def _text(req: dict, key: str, limit: int, *, required: bool = False) -> str | None:
+    value = req.get(key)
+    if value is None:
+        if required:
+            raise RequestError(f"a '{key}' is required")
+        return None
+    if not isinstance(value, str):
+        raise RequestError(f"'{key}' must be a string")
+    if len(value.encode("utf-8")) > limit:
+        raise RequestError(f"'{key}' is larger than {limit // 1024} KiB")
+    return value
+
+
+def _item_id(req: dict) -> int:
+    value = req.get("id")
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RequestError(f"'id' must be an item number, got {value!r}")
+    return value
+
+
 def _named_plan(action: str, req: dict) -> list[str]:
     argv = [CLIXZ_BIN, *NAMED_PLAN_ACTIONS[action]]
     if action == "category-add":
@@ -106,15 +140,25 @@ def _named_plan(action: str, req: dict) -> list[str]:
 
 
 def build_argv(req: dict) -> list[str]:
-    """Translate a validated request into argv, or raise :class:`RequestError`.
+    """Translate a validated CLI request into argv, or raise :class:`RequestError`.
 
-    All of the safety lives here: the subcommand comes from a closed set, every
-    variable argument is regex-checked, and nothing reaches a shell.
+    The subcommand comes from a closed set, every variable argument is
+    regex-checked, and nothing reaches a shell.
     """
     cmd = req.get("cmd")
 
     if cmd in _GROUP_READS:
         return [CLIXZ_BIN, *_GROUP_READS[cmd], "--json"]
+
+    if cmd == "todo":
+        state = req.get("state")
+        if state is None:
+            return [CLIXZ_BIN, "todo", "ls", "--all", "--json"]
+        if state not in STATES:
+            raise RequestError(f"invalid state: {state!r} (known: {', '.join(STATES)})")
+        return [CLIXZ_BIN, "todo", "ls", "--state", str(state), "--json"]
+    if cmd == "todo-show":
+        return [CLIXZ_BIN, "todo", "show", str(_item_id(req)), "--json"]
 
     if cmd in READ_COMMANDS:
         argv = [CLIXZ_BIN, str(cmd), "--json"]
@@ -135,58 +179,92 @@ def build_argv(req: dict) -> list[str]:
             argv.append("--dry-run")
         return argv
 
-    if cmd == "plan":
-        action = req.get("action")
-        if action in NAMED_PLAN_ACTIONS:
-            return _named_plan(action, req)
-        if action not in PLAN_ACTIONS:
-            raise RequestError(
-                f"unknown action: {action!r} "
-                f"(known: {', '.join((*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS))})"
-            )
-        service = _service(req.get("service"), required=(action != "fix"))
-        argv = [CLIXZ_BIN, str(action)]
-        if service:
-            argv.append(service)
-        # --plan is what makes this daemon safe to expose: the CLI prints the
-        # commands it would run and exits without writing.
-        argv += ["--plan", "--json"]
-        return argv
+    if cmd == "plan" and req.get("action") in NAMED_PLAN_ACTIONS:
+        return _named_plan(str(req["action"]), req)
 
     raise RequestError(
         f"command not allowed: {cmd!r} (read: {', '.join(READ_COMMANDS)}; "
-        f"plan: {', '.join((*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS))})"
+        f"plan: {', '.join((*APPLIED_ACTIONS, *NAMED_PLAN_ACTIONS))}; "
+        f"relayed: {', '.join(RELAYED)})"
     )
 
 
-def access() -> dict:
-    """What a caller on the socket can ask for, as the commands it turns into.
+def _relay_payload(req: dict) -> dict:
+    """Keep the fields clixz-apply understands, checked; drop everything else."""
+    cmd = req["cmd"]
+    out: dict[str, Any] = {"cmd": cmd}
+    if cmd == "plan":
+        action = req["action"]
+        out["action"] = action
+        service = _service(req.get("service"), required=(action != "fix"))
+        if service:
+            out["service"] = service
+        if action in ("new", "edit"):
+            for key, limit in (("compose", MAX_COMPOSE), ("service_yaml", MAX_SERVICE_YAML)):
+                value = _text(req, key, limit)
+                if value is not None:
+                    out[key] = value
+        if req.get("stack") is not None:
+            if action != "new":
+                raise RequestError("'stack' only goes with 'new'")
+            out["stack"] = _checked(req, "stack", STACK_RE, required=True)
+    elif cmd in ("apply", "plan-show", "plan-drop"):
+        out["plan_id"] = _checked(req, "plan_id", PLAN_ID_RE, required=True)
+    elif cmd in ("todo-add", "todo-edit"):
+        if cmd == "todo-edit":
+            out["id"] = _item_id(req)
+        for key in ("title", "description", "state"):
+            value = _text(req, key, 32 * 1024, required=(cmd == "todo-add" and key == "title"))
+            if value is not None:
+                out[key] = value
+    elif cmd == "todo-rm":
+        out["id"] = _item_id(req)
+    return out
 
-    Built by running :func:`build_argv` on a sample of each request rather than
+
+def route(req: dict) -> tuple[str, Any]:
+    """``("cli", argv)``, ``("relay", payload)`` or ``("local", answer)``."""
+    cmd = req.get("cmd")
+    if cmd == "version":
+        return "local", {"ok": True, "version": __version__}
+    if (cmd == "plan" and req.get("action") in APPLIED_ACTIONS) or cmd in RELAYED:
+        return "relay", _relay_payload(req)
+    return "cli", build_argv(req)
+
+
+def access() -> dict:
+    """What a caller on the socket can ask for, and where each request goes.
+
+    Built by running :func:`route` on a sample of each request rather than
     written out by hand, so `clixz mcp` cannot drift from what the daemon does.
     """
-    options = {"check": "[service] [--verbose]", "ls": "[--category <category>]"}
-    samples = {"show": {"service": "category/service"}}
+    options = {"check": "[service] [--verbose]", "ls": "[--category <category>]",
+               "todo": "[--state <state>]"}
+    samples: dict[str, dict] = {"show": {"service": "category/service"}, "todo-show": {"id": 1}}
     read = []
     for cmd in READ_COMMANDS:
         argv = build_argv({"cmd": cmd, **samples.get(cmd, {})})[1:]
         read.append({"request": cmd,
                      "runs": " ".join(["clixz", *argv, options.get(cmd, "")]).strip()})
 
-    plan_samples = {
-        "new": {"service": "category/service"}, "fix": {},
-        "rm": {"service": "category/service"},
-        "category-add": {"name": "name"}, "repo-add": {"name": "name"},
-        "repo-rm": {"name": "name"},
-    }
-    plan_options = {"fix": "[service]", "category-add": "[--account <account>]",
-                    "repo-add": "[--url <url>]"}
+    plan_samples = {"category-add": {"name": "name"}, "repo-add": {"name": "name"},
+                    "repo-rm": {"name": "name"}}
+    plan_options = {"category-add": "[--account <account>]", "repo-add": "[--url <url>]"}
     plan = []
-    for action in (*PLAN_ACTIONS, *NAMED_PLAN_ACTIONS):
+    for action in NAMED_PLAN_ACTIONS:
         argv = build_argv({"cmd": "plan", "action": action, **plan_samples[action]})[1:]
         plan.append({"request": action,
                      "runs": " ".join(["clixz", *argv, plan_options.get(action, "")]).strip()})
-    return {"socket": SOCKET_PATH, "read": read, "plan": plan}
+
+    relay = [{"request": f"plan {action}",
+              "does": "compute and store a plan (clixz-apply)"} for action in APPLIED_ACTIONS]
+    does = {"plans": "list the stored plans", "plan-show": "one stored plan",
+            "plan-drop": "delete a stored plan", "apply": "apply a stored plan, once",
+            "exposed": "read the proxy database, live", "todo-add": "add a todo item",
+            "todo-edit": "edit a todo item", "todo-rm": "delete a todo item"}
+    relay += [{"request": cmd, "does": does[cmd]} for cmd in RELAYED]
+    return {"socket": SOCKET_PATH, "apply_socket": APPLY_SOCKET,
+            "read": read, "plan": plan, "relay": relay}
 
 
 def run(argv: list[str]) -> dict:
@@ -217,6 +295,39 @@ def run(argv: list[str]) -> dict:
     }
 
 
+def relay(payload: dict) -> dict:
+    """Send one request to clixz-apply and return its answer."""
+    if not os.path.exists(APPLY_SOCKET):
+        return {"ok": False,
+                "error": f"clixz-apply is not installed ({APPLY_SOCKET} is missing): "
+                         "run `sudo clixz daemon install` on the host"}
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(APPLY_TIMEOUT)
+            sock.connect(APPLY_SOCKET)
+            sock.sendall(data)
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > MAX_RESPONSE:
+                    return {"ok": False, "error": "clixz-apply answered more than 4 MiB"}
+                if chunk.endswith(b"\n"):
+                    break
+    except (OSError, socket.timeout) as exc:
+        return {"ok": False, "error": f"clixz-apply unreachable: {exc}"}
+    try:
+        answer = json.loads(b"".join(chunks).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        return {"ok": False, "error": f"unreadable answer from clixz-apply: {exc}"}
+    return answer if isinstance(answer, dict) else {"ok": False, "error": "bad answer"}
+
+
 def handle(raw: bytes) -> dict:
     try:
         req = json.loads(raw.decode("utf-8"))
@@ -225,10 +336,30 @@ def handle(raw: bytes) -> dict:
     if not isinstance(req, dict):
         return {"ok": False, "error": "malformed request: an object is expected"}
     try:
-        argv = build_argv(req)
+        kind, value = route(req)
     except RequestError as exc:
         return {"ok": False, "error": str(exc)}
-    return run(argv)
+    if kind == "local":
+        return value
+    if kind == "relay":
+        return relay(value)
+    return run(value)
+
+
+# ─── version ─────────────────────────────────────────────────────────────────
+
+def installed_version() -> str | None:
+    """The version on disk now — not the one this process imported."""
+    importlib.invalidate_caches()
+    try:
+        return importlib.metadata.version("clixz")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def version_changed() -> bool:
+    current = installed_version()
+    return current is not None and current != __version__
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -253,6 +384,24 @@ class Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = 16
+    # How often to look for an upgrade. An upgrade that leaves this process
+    # running has upgraded the CLI and not the gateway: when the installed
+    # version moves, the daemon leaves and systemd (Restart=always) starts the
+    # new code — whichever installer did the upgrade.
+    check_interval = 30.0
+    _last_check = 0.0
+    _leaving = False
+
+    def service_actions(self) -> None:
+        now = time.monotonic()
+        if self._leaving or now - self._last_check < self.check_interval:
+            return
+        self._last_check = now
+        if version_changed():
+            self._leaving = True
+            print(f"[clixz-mcpd] clixz {installed_version()} is installed, this process runs "
+                  f"{__version__}: exiting so that systemd restarts it", flush=True)
+            threading.Thread(target=self.shutdown, daemon=True).start()
 
 
 def main() -> None:
@@ -267,7 +416,7 @@ def main() -> None:
     # 0660: the MCP container carries the daemon's gid and can connect; nothing
     # else on the host can. The socket is the only surface this daemon has.
     os.chmod(path, 0o660)
-    print(f"[clixz-mcpd] listening on {path}", flush=True)
+    print(f"[clixz-mcpd] {__version__} listening on {path}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

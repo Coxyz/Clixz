@@ -1,0 +1,66 @@
+# Installed by `sudo clixz daemon install` from the clixz package. Edit the
+# template in the package, not this file: the next install rewrites it.
+[Unit]
+Description=clixz gateway for the MCP server (unprivileged; writes go through clixz-apply)
+After=network.target
+
+[Service]
+Type=simple
+# Unprivileged, and it must stay that way: the MCP server in front of it is on
+# the internet. Reads run the CLI here. Everything that writes — a service plan
+# applied, a todo item — is relayed to clixz-apply, a root process systemd
+# starts for that one request (clixz-apply.socket), which validates it again.
+User=svc_mcprun
+Group=svc_mcprun
+# Every category's group, computed from the config at install time: a category
+# whose group is missing here is invisible to the MCP server. The .env files
+# stay unreadable: none of these groups owns them.
+SupplementaryGroups=@GROUPS@
+
+# /usr/local/bin is root:root 755, so this stays a trustworthy target whichever
+# installer put it there.
+ExecStart=/usr/local/bin/clixz-mcpd
+Environment=CLIXZ_BIN=/usr/local/bin/clixz
+Environment=CLIXZ_MCPD_SOCKET=/run/clixz-mcpd/clixz-mcpd.sock
+Environment=CLIXZ_APPLY_SOCKET=/run/clixz-apply.sock
+Environment=PYTHONUNBUFFERED=1
+
+RuntimeDirectory=clixz-mcpd
+RuntimeDirectoryMode=0750
+# Not a detail: this directory is bind-mounted into the MCP container. Systemd's
+# default removes and recreates it on every restart, which leaves the container's
+# mount pointing at a deleted inode — the socket then vanishes from inside the
+# container, silently, until the container itself is recreated.
+RuntimeDirectoryPreserve=yes
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+# Reads the tree; writes nowhere. A compromise of this process can ask
+# clixz-apply for what clixz-apply accepts, and nothing more.
+ReadOnlyPaths=@ROOT_DIR@ @CONFIG_DIR@
+
+# Always: the daemon exits on its own when it notices clixz was upgraded under
+# it, so that it never keeps serving the code it imported at start.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

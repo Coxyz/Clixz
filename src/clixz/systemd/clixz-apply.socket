@@ -1,0 +1,18 @@
+# Installed by `sudo clixz daemon install` from the clixz package.
+[Unit]
+Description=clixz-apply: the root half of the MCP gateway, one process per request
+
+[Socket]
+# Only clixz-mcpd connects: the socket is root:svc_mcprun 0660, and it lives
+# outside /run/clixz-mcpd, the one directory mounted into the MCP container.
+ListenStream=/run/clixz-apply.sock
+SocketUser=root
+SocketGroup=svc_mcprun
+SocketMode=0660
+# One clixz-apply@ process per connection: nothing privileged keeps running
+# between requests, and each request runs the clixz installed at that moment.
+Accept=yes
+MaxConnections=8
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,51 @@
+# Installed by `sudo clixz daemon install` from the clixz package.
+[Unit]
+Description=clixz-apply: one request from clixz-mcpd
+CollectMode=inactive-or-failed
+
+[Service]
+# Root, for one request: compute and store a plan, apply a stored one, read
+# the reverse proxy database, write the todo. The request arrives on stdin, the
+# answer leaves on stdout; both are the connection. Every field is validated
+# here again — clixz-mcpd is not trusted.
+ExecStart=/usr/local/bin/clixz-apply
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+User=root
+UMask=0022
+RuntimeMaxSec=300
+Environment=PYTHONUNBUFFERED=1
+# The docker CLI (container names for `exposed`, Komodo Core's address) looks
+# for a config under $HOME, which ProtectHome hides: point it at nothing.
+Environment=DOCKER_CONFIG=@STATE_DIR@/docker
+
+# What it may write: the service tree, its own state (plans, todo) and the
+# manifest it refreshes. Nothing else — not the config, not lint.yaml, not
+# ignore.yaml, not the units: the rules that bound a plan stay out of reach.
+ProtectSystem=strict
+ReadWritePaths=@ROOT_DIR@ @STATE_DIR@ -@MANIFEST@
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# Network: just enough to reach Komodo Core on a Docker network, to create a
+# new service's stack. Unix sockets (Docker's) are not affected.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost 172.16.0.0/12

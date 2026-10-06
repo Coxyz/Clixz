@@ -49,7 +49,7 @@ version = { attr = "clixz.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-clixz = ["default_config.yaml", "default_lint.yaml", "default_ignore.yaml"]
+clixz = ["default_config.yaml", "default_lint.yaml", "default_ignore.yaml", "systemd/*"]
 
 [tool.ruff]
 line-length = 110

@@ -33,8 +33,8 @@ So 2.0 moves the effort:
 | Nothing looked at the reverse proxy | `clixz exposed` cross-checks it |
 | 6 126 lines | ~2 900 lines at 2.0 (~4 100 at 2.2, with rules, repos and categories) |
 
-`docs/REFONTE.md` records the reasoning and the decisions; `docs/TODO-OPXYZ.md`
-lists the host-side actions the audit produced.
+`docs/REFONTE.md` records the reasoning and the decisions. The host-side actions
+the audit produced are in `clixz todo`.
 
 ## What changed in 2.3
 

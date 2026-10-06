@@ -352,7 +352,8 @@ Deux bugs réels trouvés par les tests pendant l'écriture :
    `chmod 640` puis `setfacl -b` ne laisse pas 640. v1 contournait le piège en
    ne faisant jamais de `chmod` sur un chemin ACL ; v2 retire les ACL d'abord.
 
-Reste à faire côté humain : `docs/TODO-OPXYZ.md`.
+Reste à faire côté humain : dans `clixz todo` depuis le 2026-10-06 (importé de
+l'ancien `docs/TODO-OPXYZ.md`).
 
 ## 12. Depuis la 2.0 (état au 2026-09-30)
 
@@ -376,7 +377,7 @@ qui a changé depuis, et qui contredit ou complète ce qui précède :
 - **Publication** : PyPI est alimenté par une release GitHub, plus par un tag
   seul.
 
-Les phases 0, 2 et 3 du §6 sont suivies dans `docs/TODO-OPXYZ.md`.
+Les phases 0, 2 et 3 du §6 sont suivies dans `clixz todo`.
 
 ## 13. 2.3 — la décision du §9 renversée (2026-10-06)
 

@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -28,6 +29,7 @@ from rich.table import Table
 
 from . import __version__
 from . import compose as compose_mod
+from . import daemon as daemon_mod
 from . import mcpd as mcpd_mod
 from . import npm as npm_mod
 from . import repo as repo_mod
@@ -66,13 +68,12 @@ from .policy import (
 from .scaffold import CreateRequest, create_service, plan_create
 from .system import CommandExecutionError, missing_bins
 from .upgrade import (
-    MCPD_UNIT,
-    RESTART_MCPD,
     UMASK,
     installed_version,
-    mcpd_running,
+    latest_version,
     needs_root,
     plan_upgrade,
+    run_upgrade,
 )
 
 app = typer.Typer(
@@ -1176,56 +1177,89 @@ def mcp_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
                   "in its own image, not here.[/dim]")
 
 
+def _launcher() -> str:
+    script = sys.argv[0]
+    if not os.path.isabs(script):
+        script = shutil.which(script) or os.path.abspath(script)
+    return script
+
+
 @app.command("upgrade", rich_help_panel=ITSELF)
 def upgrade_cmd(
     plan: Annotated[bool, typer.Option(
-        "--plan", help="Print the command that would run, and run nothing.")] = False,
+        "--plan", help="Print the commands that would run, and run nothing.")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Upgrade clixz itself, with the installer and the umask it needs."""
+    """Upgrade clixz to the latest release, without cache, then its units."""
     prefix = Path(sys.prefix)
     upgrade = plan_upgrade(prefix, Path(sys.argv[0]))
     if upgrade is None:
         err.print(f"[red]ERROR[/red] {prefix} was installed by neither pipx nor uv; "
                   "upgrade it the way it was installed.")
         raise typer.Exit(code=2)
+    units_installed = (daemon_mod.UNIT_DIR / daemon_mod.MCPD_UNIT).exists()
+    latest = latest_version()
+
     if plan:
         assignments = [f"{key}={value}" for key, value in upgrade.env.items()]
         commands = [[*assignments, *upgrade.argv]]
-        if mcpd_running():
-            commands.append([*RESTART_MCPD, "# only if the version changed"])
-        return _render_plan(commands, json_out=json_out, action="upgrade", target=str(prefix))
+        if units_installed:
+            commands.append(["clixz", "daemon", "install", "# the new version's"])
+        if json_out:
+            return emit({"plan": True, "action": "upgrade", "target": str(prefix),
+                         "installed": __version__, "latest": latest, "commands": commands})
+        console.print(f"[dim]installed {__version__}, PyPI {latest or 'unreachable'}[/dim]")
+        return _render_plan(commands, json_out=False, action="upgrade", target=str(prefix))
+
+    if latest is not None and latest == __version__:
+        console.print(f"[green]✓[/green] clixz {__version__} is the latest release.")
+        return
     if shutil.which(upgrade.argv[0]) is None:
         err.print(f"[red]ERROR[/red] {upgrade.argv[0]} installed clixz but was not found on PATH.")
         raise typer.Exit(code=2)
     if needs_root(prefix):
         ensure_root()
-    # The whole point of this command: see upgrade.py.
+    # On a host with UMASK 027 the installer would leave the venv unreadable
+    # to the unprivileged daemon: see upgrade.py.
     os.umask(UMASK)
-    try:
-        done = subprocess.run(upgrade.argv, env={**os.environ, **upgrade.env}, check=False)
-    except OSError as exc:  # pragma: no cover
-        err.print(f"[red]ERROR[/red] {upgrade.argv[0]} failed: {exc}")
-        raise typer.Exit(code=2)
-    if done.returncode != 0:
-        raise typer.Exit(code=done.returncode)
+    if latest:
+        console.print(f"[dim]PyPI publishes {latest}; installing it without cache…[/dim]")
 
-    after = installed_version(sys.executable)
+    def run() -> int:
+        try:
+            return subprocess.run(upgrade.argv, env={**os.environ, **upgrade.env},
+                                  check=False).returncode
+        except OSError as exc:  # pragma: no cover
+            err.print(f"[red]ERROR[/red] {upgrade.argv[0]} failed: {exc}")
+            return 2
+
+    def wait(delay: float) -> None:
+        console.print(f"[dim]PyPI does not serve {latest} to the installer yet; "
+                      f"trying again in {delay:.0f}s…[/dim]")
+        time.sleep(delay)
+
+    code, after = run_upgrade(run, latest, sleep=wait,
+                              version_after=lambda: installed_version(sys.executable))
+    if code != 0:
+        raise typer.Exit(code=code)
+    if latest is not None and after != latest:
+        err.print(f"[red]✗[/red] {latest} is published, but {after or 'an unknown version'} is "
+                  "what got installed. Try again in a minute.")
+        raise typer.Exit(code=1)
     if after is None or after == __version__:
+        console.print(f"[green]✓[/green] clixz {__version__}: nothing newer was installed.")
         return
     console.print(f"[green]✓[/green] clixz {__version__} → {after}")
-    if not mcpd_running():
+    if not units_installed:
         return
     if os.geteuid() != 0:
-        console.print(f"[yellow]![/yellow] {MCPD_UNIT} still runs {__version__}: "
-                      f"`sudo {' '.join(RESTART_MCPD)}`")
+        console.print("[yellow]![/yellow] Now `sudo clixz daemon install`: the units and the "
+                      "gateway still run the previous version.")
         return
-    restarted = subprocess.run(RESTART_MCPD, check=False)
-    if restarted.returncode == 0:
-        console.print(f"[green]✓[/green] Restarted {MCPD_UNIT} on the new version.")
-    else:
-        err.print(f"[red]✗[/red] Could not restart {MCPD_UNIT}: "
-                  f"`sudo {' '.join(RESTART_MCPD)}`")
+    # The new binary, not this process: it imported the old code.
+    done = subprocess.run([_launcher(), "daemon", "install"], check=False)
+    if done.returncode != 0:
+        err.print("[red]✗[/red] `clixz daemon install` failed — run it again with sudo.")
         raise typer.Exit(code=1)
 
 

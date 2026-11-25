@@ -21,12 +21,14 @@ secret — which is the whole of what the audit found worth enforcing.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from pathlib import Path
 
 import yaml
 
+from .repo import MODE_RE
 from .rules import Policy, load_policy
 
 # Where the config lives when nothing says otherwise, and therefore where the
@@ -152,6 +154,9 @@ class Config:
     manifest_path: Path | None = None
     images_dir: Path = Path("/opt/images")
     repos_dir: Path = Path("/opt/repos")
+    # "user:group" and a chmod spec for the checkouts; None leaves them alone.
+    repos_owner: str | None = None
+    repos_mode: str | None = None
     npm: NpmConfig = field(default_factory=NpmConfig)
     state: StateConfig = field(default_factory=StateConfig)
     komodo: KomodoConfig = field(default_factory=KomodoConfig)
@@ -247,6 +252,10 @@ def parse_config(raw: dict) -> Config:
         if isinstance(repos, dict) and repos.get("dir")
         else Path("/opt/repos")
     )
+    repos_owner = repos_mode = None
+    if isinstance(repos, dict):
+        repos_owner = str(repos["owner"]) if repos.get("owner") else None
+        repos_mode = str(repos["mode"]) if repos.get("mode") else None
 
     root_dir = Path(str(raw["root_dir"]))
     npm_raw = raw.get("npm")
@@ -266,6 +275,8 @@ def parse_config(raw: dict) -> Config:
         manifest_path=manifest_path,
         images_dir=images_dir,
         repos_dir=repos_dir,
+        repos_owner=repos_owner,
+        repos_mode=repos_mode,
         npm=npm,
         state=_parse_state(raw.get("state")),
         komodo=_parse_komodo(raw.get("komodo")),
@@ -334,9 +345,11 @@ RETIRED_KEYS = {
 # service's stack. A key outside this set is most likely v1's ACL principal.
 KOMODO_KEYS = ("credentials", "server", "container", "port", "run_root")
 
-# `repos` came back in 2.2 with a single key. What v1 stored under it (owner,
-# mode, ACL, recursive) is still retired: /opt/repos is not audited.
-RETIRED_REPOS_KEYS = ("owner", "mode", "acl", "recursive")
+# `repos` came back in 2.2 with a single key; 2.4 brought owner and mode back,
+# for Komodo, which pulls as root. v1's ACL and `recursive` stay retired.
+REPOS_KEYS = ("dir", "owner", "mode")
+RETIRED_REPOS_KEYS = ("acl", "recursive")
+_OWNER_RE = re.compile(r"^[a-z_][a-z0-9_.-]*:[a-z_][a-z0-9_.-]*$", re.IGNORECASE)
 
 RETIRED_RULES = {
     "category_dir": "dir", "service_dir": "dir", "config_dir": "dir", "data_dir": "dir",
@@ -409,10 +422,18 @@ def validate_config(raw: dict) -> list[str]:
     if repos is not None and not isinstance(repos, dict):
         issues.append("'repos' must be a mapping with a 'dir' path")
     elif isinstance(repos, dict):
-        for key in RETIRED_REPOS_KEYS:
-            if key in repos:
-                issues.append(f"repos.{key} was retired in v2 — /opt/repos is not audited, "
-                              "only 'dir' is read")
+        for key in repos:
+            if key in RETIRED_REPOS_KEYS:
+                issues.append(f"repos.{key} was retired in v2 — no ACL on /opt/repos, "
+                              "only 'dir', 'owner' and 'mode' are read")
+            elif key not in REPOS_KEYS:
+                issues.append(f"unknown key repos.{key} (known: {', '.join(REPOS_KEYS)})")
+        owner = repos.get("owner")
+        if owner is not None and not _OWNER_RE.match(str(owner)):
+            issues.append(f"repos.owner must be 'user:group', not {owner!r}")
+        if repos.get("mode") is not None and not MODE_RE.match(str(repos["mode"])):
+            issues.append(f"repos.mode must be octal or a chmod symbolic spec "
+                          f"(u+rwX,g+rwX), not {repos['mode']!r}")
 
     for key in raw:
         if key in RETIRED_KEYS:

@@ -49,9 +49,14 @@ images:
   dir: /opt/images
 
 # Git checkouts, one directory each. Created by `clixz repo add`, listed by
-# `clixz repo ls`; ownership is not audited.
+# `clixz repo ls`. `clixz check` does not audit them; with an `owner` (and a
+# `mode`), `repo ls` shows the checkouts that drifted and `repo fix` gives them
+# back. Komodo Periphery pulls as root: `clixz repo hook` prints the command
+# its Repos run after each pull so that it hands the files back itself.
 repos:
   dir: /opt/repos
+  # owner: "boxyz_dev:boxyz_dev"
+  # mode: "u+rwX,g+rwX,o-w"     # octal, or chmod symbolic (X: dirs and executables)
 
 # `clixz exposed` reads this database to compare what the reverse proxy
 # actually publishes against what the service descriptors declare. Read-only,

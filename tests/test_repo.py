@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from clixz.repo import list_repos, plan_add, public_url, validate_repo_url
+from clixz.repo import (
+    foreign_entry,
+    komodo_hook,
+    list_repos,
+    plan_add,
+    plan_fix,
+    public_url,
+    validate_repo_url,
+)
 
 
 class ListTests(unittest.TestCase):
@@ -92,3 +101,42 @@ class PlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_with_an_owner_the_new_checkout_is_handed_over(self) -> None:
+        commands = plan_add(Path("/opt/repos"), "demo", None, "dev:dev", "g+rwX")
+        self.assertEqual(["chown", "-R", "-h", "dev:dev", "/opt/repos/demo"], commands[-2])
+        self.assertEqual(["chmod", "-R", "g+rwX", "/opt/repos/demo"], commands[-1])
+
+
+class OwnershipTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        (self.base / "demo" / "src").mkdir(parents=True)
+        (self.base / "demo" / "src" / "a.py").write_text("", encoding="utf-8")
+        self.me = (os.getuid(), os.getgid())
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_checkout_owned_by_us_has_no_foreign_entry(self) -> None:
+        self.assertIsNone(foreign_entry(self.base / "demo", *self.me))
+
+    def test_the_first_foreign_entry_is_reported(self) -> None:
+        # Another uid stands in for root: we cannot chown in a test.
+        self.assertEqual(self.base / "demo", foreign_entry(self.base / "demo", self.me[0] + 1,
+                                                           self.me[1]))
+
+    def test_fix_never_follows_a_symlinked_checkout(self) -> None:
+        (self.base / "link").symlink_to(self.base / "demo")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            plan_fix(self.base, "link", "dev:dev", None)
+
+    def test_fix_is_a_recursive_chown_that_does_not_dereference(self) -> None:
+        self.assertEqual([["chown", "-R", "-h", "dev:dev", str(self.base / "demo")]],
+                         plan_fix(self.base, "demo", "dev:dev", None))
+
+    def test_the_komodo_hook_uses_numeric_ids_and_chmods_first(self) -> None:
+        self.assertEqual("chown -R -h 997:1006 .", komodo_hook(997, 1006, None))
+        self.assertEqual("chmod -R g+rwX . && chown -R -h 997:1006 .",
+                         komodo_hook(997, 1006, "g+rwX"))

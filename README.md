@@ -111,6 +111,8 @@ clixz meta [service] [--scaffold]
 clixz manifest [--dry-run]
 clixz image add|rm|ls <name>    # build contexts under /opt/images
 clixz repo add|rm|ls <name>     # git checkouts under /opt/repos (add --url clones)
+clixz repo fix [name] [--plan]  # give the checkouts back to repos.owner
+clixz repo hook                 # the On Pull command for Komodo Repos
 clixz category ls
 clixz rules --edit | --edit-ignore
 clixz config [--migrate] [--edit]
@@ -151,7 +153,7 @@ rules:
   file: { mode: "640" }                        # compose.yaml, service.yaml
   env:  { mode: "600", owner: "root:root" }    # .env
 images: { dir: /opt/images }
-repos:  { dir: /opt/repos }
+repos:  { dir: /opt/repos, owner: "boxyz_dev:boxyz_dev", mode: "u+rwX,g+rwX,o-w" }
 npm:
   database: /srv/docker/network/npm/data/app/database.sqlite
 ```
@@ -164,6 +166,31 @@ that touches a `service.yaml`.
 clixz's own state — the stored plans and the todo — lives in `/var/lib/clixz`
 (`state: {dir, group}`): `plans/` is root's alone, `todo.yaml` is readable by
 everyone and writable by the `group` (default `docker`, the operators).
+
+### Repos owned by the development account
+
+Komodo Periphery runs as root, so every file a Komodo pull or rebase rewrites
+in `/opt/repos` comes back root-owned. With `repos.owner` set, `clixz repo ls`
+shows the checkouts that drifted and `clixz repo fix` gives them back (and
+`clixz repo add` hands a new one over at once). To stop the drift at the
+source, `clixz repo hook` prints the command to put in each Komodo Repo's
+*On Clone* and *On Pull*, with numeric ids since the names do not exist in the
+container:
+
+```
+chmod -R u+rwX,g+rwX,o-w . && chown -R -h 997:1006 .
+```
+
+Periphery's compose then needs the capabilities to do it, and git there must
+accept a checkout it does not own — otherwise every pull after the first fails
+with "detected dubious ownership". A system gitconfig does it; environment
+variables are not enough, since nothing says Komodo hands them to git:
+
+```yaml
+cap_add: [DAC_OVERRIDE, CHOWN, FOWNER]   # FOWNER only with repos.mode
+volumes:
+  - ./config/gitconfig:/etc/gitconfig:ro # [safe] directory = *
+```
 
 ### Compose rules and accepted exceptions
 

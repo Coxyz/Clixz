@@ -182,6 +182,51 @@ class ChangeCliTests(unittest.TestCase):
         self.assertTrue(any("Komodo" in line for line in payload["never"]))
 
 
+class RepoOwnerCliTests(unittest.TestCase):
+    """repos.owner: drift in `repo ls`, a plan from `repo fix`, the Komodo hook."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        me = pwd.getpwuid(os.getuid()).pw_name
+        group = grp.getgrgid(os.getgid()).gr_name
+        self.base = root / "repos"
+        (self.base / "demo" / ".git").mkdir(parents=True)
+        (self.base / "demo" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        self.config = root / "config.yaml"
+        self.config.write_text(yaml.safe_dump({
+            "root_dir": str(root / "tree"),
+            "categories": {"apps": {"user": me, "group": group}},
+            "npm": {"database": None},
+            "repos": {"dir": str(self.base), "owner": f"{me}:{group}", "mode": "g+rwX"},
+        }), encoding="utf-8")
+        self.owner = f"{me}:{group}"
+        self.runner = CliRunner()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def clixz(self, *args: str):
+        return self.runner.invoke(app, ["-c", str(self.config), *args],
+                                  env={"NO_COLOR": "1", "COLUMNS": "200"})
+
+    def test_a_checkout_we_own_is_not_drifted_and_fix_has_nothing_to_do(self) -> None:
+        [row] = json.loads(self.clixz("repo", "ls", "--json").stdout)["repos"]
+        self.assertTrue(row["owner_ok"])
+        self.assertIn("Nothing to fix", self.clixz("repo", "fix").output)
+
+    def test_fix_of_a_named_checkout_plans_chown_then_chmod(self) -> None:
+        plan = json.loads(self.clixz("repo", "fix", "demo", "--plan", "--json").stdout)
+        self.assertEqual([["chown", "-R", "-h", self.owner, str(self.base / "demo")],
+                          ["chmod", "-R", "g+rwX", str(self.base / "demo")]], plan["commands"])
+
+    def test_the_hook_uses_numeric_ids(self) -> None:
+        hook = json.loads(self.clixz("repo", "hook", "--json").stdout)
+        self.assertEqual(f"chmod -R g+rwX . && chown -R -h {os.getuid()}:{os.getgid()} .",
+                         hook["command"])
+        self.assertEqual(["CHOWN", "FOWNER"], hook["cap_add"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

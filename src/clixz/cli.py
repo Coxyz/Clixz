@@ -68,7 +68,7 @@ from .policy import (
     resolve_service,
     unknown_category_dirs,
 )
-from .system import CommandExecutionError, missing_bins
+from .system import CommandExecutionError, missing_bins, owner_ids
 from .todo import OPEN_STATES, STATES, TodoError, TodoStore
 from .upgrade import (
     UMASK,
@@ -975,7 +975,8 @@ def repo_add_cmd(
 ) -> None:
     """Create /opt/repos/<name>: an empty git repository, or a clone of --url."""
     try:
-        commands = repo_mod.plan_add(ctx.config.repos_dir, name, url)
+        commands = repo_mod.plan_add(ctx.config.repos_dir, name, url,
+                                     ctx.config.repos_owner, ctx.config.repos_mode)
     except ValueError as exc:
         if json_out:
             emit({"ok": False, "error": str(exc)})
@@ -984,6 +985,8 @@ def repo_add_cmd(
         raise typer.Exit(code=2)
     if plan:
         return _render_plan(commands, json_out=json_out, action="repo add", target=name)
+    if ctx.config.repos_owner:
+        ensure_root()  # handing the checkout to repos.owner is a chown
     for command in commands:
         done = subprocess.run(command, check=False)
         if done.returncode != 0:
@@ -1031,24 +1034,133 @@ def repo_rm_cmd(
 
 @repo_app.command("ls")
 def repo_ls_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
-    """List the checkouts with their branch and remote."""
+    """List the checkouts with their branch, remote and, if configured, owner drift."""
     base = ctx.config.repos_dir
     rows = repo_mod.list_repos(base)
+    ids = _repos_owner_ids()
+    if ids:
+        for row in rows:
+            foreign = repo_mod.foreign_entry(Path(row["path"]), *ids)
+            row["owner_ok"] = foreign is None
+            if foreign is not None:
+                row["foreign"] = str(foreign)
     if json_out:
-        return emit({"repos": rows, "dir": str(base)})
+        return emit({"repos": rows, "dir": str(base), "owner": ctx.config.repos_owner})
     if not rows:
         console.print(f"[dim]No repos under {base}.[/dim]")
         return
     table = Table(box=None, pad_edge=False)
-    for column in ("NAME", "BRANCH", "REMOTE"):
+    columns = ["NAME", "BRANCH", "REMOTE"] + (["OWNER"] if ids else [])
+    for column in columns:
         table.add_column(column, overflow="fold")
+    drifted = 0
     for row in rows:
-        if not row["git"]:
-            table.add_row(row["name"], "[dim]not a git repository[/dim]", "")
-            continue
-        table.add_row(row["name"], row.get("branch") or "[dim]—[/dim]",
-                      row.get("remote") or "[dim]no origin[/dim]")
+        cells = ([row.get("branch") or "[dim]—[/dim]", row.get("remote") or "[dim]no origin[/dim]"]
+                 if row["git"] else ["[dim]not a git repository[/dim]", ""])
+        if ids:
+            ok = row["owner_ok"]
+            drifted += not ok
+            cells.append("[green]✓[/green]" if ok else
+                         f"[red]✗[/red] [dim]{escape(row['foreign'])}[/dim]")
+        table.add_row(row["name"], *cells)
     console.print(table)
+    if drifted:
+        console.print(f"\n[dim]{drifted} checkout(s) not owned by {ctx.config.repos_owner}: "
+                      "`clixz repo fix`.[/dim]")
+
+
+def _repos_owner_ids() -> tuple[int, int] | None:
+    """``(uid, gid)`` of ``repos.owner``; None when unset. Exits if it does not resolve."""
+    owner = ctx.config.repos_owner
+    if not owner:
+        return None
+    ids = owner_ids(owner)
+    if ids is None:
+        err.print(f"[red]ERROR[/red] repos.owner {owner!r}: unknown user or group.")
+        raise typer.Exit(code=2)
+    return ids
+
+
+@repo_app.command("fix")
+def repo_fix_cmd(
+    name: Annotated[Optional[str], typer.Argument(
+        help="One checkout (default: every checkout not owned by repos.owner).")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the plan, write nothing.")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Give the checkouts back to repos.owner, with repos.mode (after a root pull)."""
+    owner, mode = ctx.config.repos_owner, ctx.config.repos_mode
+    if not owner and not mode:
+        err.print("[red]ERROR[/red] Neither repos.owner nor repos.mode is set in the config.")
+        raise typer.Exit(code=2)
+    ids = _repos_owner_ids()
+    base = ctx.config.repos_dir
+    if name:
+        names = [name]
+    else:
+        # Without an owner there is no drift to look for: the mode goes everywhere.
+        names = [row["name"] for row in repo_mod.list_repos(base)
+                 if not (base / row["name"]).is_symlink()
+                 and (ids is None or repo_mod.foreign_entry(base / row["name"], *ids))]
+    try:
+        commands = [c for n in names for c in repo_mod.plan_fix(base, n, owner, mode)]
+    except ValueError as exc:
+        if json_out:
+            emit({"ok": False, "error": str(exc)})
+            raise typer.Exit(code=2)
+        err.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=2)
+    target = name or "repos"
+    if plan:
+        return _render_plan(commands, json_out=json_out, action="repo fix", target=target)
+    if not commands:
+        if json_out:
+            return emit({"ok": True, "commands": [], "message": "nothing to fix"})
+        console.print("[green]✓[/green] Nothing to fix.")
+        return
+    ensure_root()
+    if not yes and not json_out:
+        _render_plan(commands, json_out=False, action="repo fix", target=target)
+        if not typer.confirm("Apply?"):
+            raise typer.Exit(code=1)
+    failed = []
+    for command in commands:
+        done = subprocess.run(command, check=False, capture_output=True, text=True)
+        if done.returncode != 0:
+            failed.append((command, done.stderr.strip() or f"exited {done.returncode}"))
+    if json_out:
+        emit({"ok": not failed, "executed": commands,
+              "failed": [{"command": c, "error": e} for c, e in failed]})
+    else:
+        if not failed:
+            console.print(f"[green]✓[/green] {len(names)} checkout(s) fixed.")
+        for command, error in failed:
+            err.print(f"[red]✗[/red] {escape(' '.join(command))} — {escape(error)}")
+    if failed:
+        raise typer.Exit(code=1)
+
+
+@repo_app.command("hook")
+def repo_hook_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """The command Komodo should run after each clone and pull of a Repo."""
+    ids = _repos_owner_ids()
+    if ids is None:
+        err.print("[red]ERROR[/red] repos.owner is not set: Komodo has nothing to hand back.")
+        raise typer.Exit(code=2)
+    command = repo_mod.komodo_hook(*ids, ctx.config.repos_mode)
+    caps = ["CHOWN"] + (["FOWNER"] if ctx.config.repos_mode else [])
+    if json_out:
+        return emit({"command": command, "cap_add": caps})
+    console.print(command, markup=False, highlight=False, soft_wrap=True)
+    err.print(
+        "\n[dim]In each Komodo Repo cloned under /repos: Config → "
+        "On Clone and On Pull → Command, path empty (the checkout).\n"
+        f"Komodo Periphery's compose needs cap_add: [DAC_OVERRIDE, {', '.join(caps)}], "
+        "and git in Periphery must accept a checkout it does not own (or every pull\n"
+        "fails with 'dubious ownership'): mount a gitconfig holding\n"
+        "  [safe]\n      directory = *\n"
+        "at /etc/gitconfig, read-only.[/dim]")
 
 
 @category_app.command("add")
@@ -1482,6 +1594,8 @@ def config_cmd(
         "manifest": str(config.resolved_manifest_path),
         "images_dir": str(config.images_dir),
         "repos_dir": str(config.repos_dir),
+        "repos_owner": config.repos_owner,
+        "repos_mode": config.repos_mode,
         "lint_file": str(config.policy.lint_source) if config.policy.lint_source else None,
         "ignore_file": str(config.policy.ignore_source) if config.policy.ignore_source else None,
         "npm_database": str(config.npm.database) if config.npm.database else None,
@@ -1494,7 +1608,9 @@ def config_cmd(
     console.print(f"[bold]Root[/bold]       {payload['root_dir']}")
     console.print(f"[bold]Manifest[/bold]   {payload['manifest']}")
     console.print(f"[bold]Images[/bold]     {payload['images_dir']}")
-    console.print(f"[bold]Repos[/bold]      {payload['repos_dir']}")
+    repos_access = "  ".join(x for x in (payload["repos_owner"], payload["repos_mode"]) if x)
+    console.print(f"[bold]Repos[/bold]      {payload['repos_dir']}"
+                  + (f"  [dim]({escape(repos_access)})[/dim]" if repos_access else ""))
     console.print(f"[bold]Rules[/bold]      {payload['lint_file'] or 'built-in defaults'}")
     console.print(f"[bold]Ignores[/bold]    {payload['ignore_file'] or '—'}")
     console.print(f"[bold]NPM db[/bold]     {payload['npm_database'] or '—'}")

@@ -10,6 +10,7 @@ Layout under ``<root_dir>/.archive/`` ::
 
     .archive/<category>/<service>/<UTC timestamp>/          full service tree
     .archive/<category>/<service>/updates/<ts>-<filename>   pre-update snapshots
+    .archive/clixz/config/updates/<ts>-ignore.yaml          ignore.yaml before a plan
 
 ``.archive`` starts with a dot and is not a configured category, so the
 discovery walk never sees it: archived services disappear from ``list`` and

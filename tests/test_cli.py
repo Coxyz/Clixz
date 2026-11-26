@@ -82,6 +82,14 @@ class CheckSummaryTests(unittest.TestCase):
         self.assertEqual((0, 0, 3, 3), (summary["warnings"], summary["lint_errors"],
                                         summary["lint_warnings"], summary["ignored"]))
 
+    def test_rules_json_carries_ignore_yaml_as_written(self) -> None:
+        rules = lambda: json.loads(self.runner.invoke(  # noqa: E731
+            app, ["-c", str(self.config), "rules", "--json"], env={"NO_COLOR": "1"}).stdout)
+        self.assertIsNone(rules()["ignore_text"])
+        text = "# a comment an ignore plan must keep\nignore: []\n"
+        (self.config.parent / "ignore.yaml").write_text(text, encoding="utf-8")
+        self.assertEqual(text, rules()["ignore_text"])
+
 
 _GOOD = "services:\n  demo:\n    image: nginx:1.27\n    restart: unless-stopped\n"
 

@@ -11,7 +11,9 @@ not mounted in the MCP container). This process trusts it no more than it
 trusts the internet: every field is validated again here, and the requests it
 accepts are a closed set —
 
-    plan        compute a plan for new / edit / fix / rm; store it unless blocked
+    plan        compute a plan for new / edit / fix / rm, or for ignore (the
+                host's ignore.yaml, never to accept an error-level rule);
+                store it unless blocked
     apply       apply a stored plan, once, if it still describes the disk
     plans       list the stored plans
     plan-show   one stored plan, contents included

@@ -20,6 +20,7 @@ Protocol — one JSON object per connection, newline-terminated::
     {"cmd": "check", "service": "bitwarden"}                  → CLI, here
     {"cmd": "plan", "action": "edit", "service": "apps/atuin",
      "compose": "services: …"}                                → clixz-apply
+    {"cmd": "plan", "action": "ignore", "ignore": "ignore: …"} → clixz-apply
     {"cmd": "apply", "plan_id": "0a1b2c3d"}                   → clixz-apply
     {"cmd": "plan", "action": "category-add", "name": "media"} → CLI --plan, here
 """
@@ -42,7 +43,7 @@ from typing import Any
 from . import __version__
 from .category import ACCOUNT_NAME_RE, CATEGORY_NAME_RE
 from .config import env
-from .plans import MAX_COMPOSE, MAX_SERVICE_YAML, PLAN_ID_RE, STACK_RE
+from .plans import MAX_COMPOSE, MAX_IGNORE, MAX_SERVICE_YAML, PLAN_ID_RE, STACK_RE
 from .repo import REPO_NAME_RE, REPO_URL_RE
 from .todo import STATES
 
@@ -61,8 +62,9 @@ _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 # Read-only verbs, run as-is through the CLI, unprivileged.
 READ_COMMANDS = ("ls", "show", "check", "manifest", "config", "rules", "repos",
                  "categories", "todo", "todo-show")
-# Service plans: computed, stored and applied by clixz-apply.
-APPLIED_ACTIONS = ("new", "edit", "fix", "rm")
+# Plans computed, stored and applied by clixz-apply: the four service actions,
+# and ignore (the host's ignore.yaml).
+APPLIED_ACTIONS = ("new", "edit", "fix", "rm", "ignore")
 # Mutations on something else than a service: planned by the CLI, never applied.
 NAMED_PLAN_ACTIONS = {
     "category-add": ["category", "add"],
@@ -196,6 +198,11 @@ def _relay_payload(req: dict) -> dict:
     if cmd == "plan":
         action = req["action"]
         out["action"] = action
+        if action == "ignore":
+            if req.get("service") is not None:
+                raise RequestError("'ignore' replaces the host's ignore.yaml: it takes no service")
+            out["ignore"] = _text(req, "ignore", MAX_IGNORE, required=True)
+            return out
         service = _service(req.get("service"), required=(action != "fix"))
         if service:
             out["service"] = service

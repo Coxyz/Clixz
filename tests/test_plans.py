@@ -17,7 +17,7 @@ from clixz import plans
 from clixz.config import parse_config
 from clixz.komodo import KomodoError
 from clixz.plans import PlanError, Request
-from clixz.rules import Ignore, Policy
+from clixz.rules import Ignore, Policy, load_policy
 from clixz.scaffold import CreateRequest, create_service
 
 COMPOSE = "services:\n  demo:\n    image: nginx:1.27\n    restart: unless-stopped\n"
@@ -364,6 +364,141 @@ class KomodoStepTests(PlanTestCase):
         self.assertTrue(outcome.ok)
         self.assertTrue((self.root / "apps" / "demo" / "compose.yaml").is_file())
         self.assertTrue(any("unreachable" in w for w in outcome.warnings), outcome.warnings)
+
+
+IGNORE_BASE = (
+    "# accepted on this host\n"
+    "ignore:\n"
+    "  - service: apps/demo\n"
+    "    rules: [privileged]\n"
+    "    reason: needs the USB stick\n"
+)
+
+
+class IgnorePlanTests(PlanTestCase):
+    """ignore.yaml through a plan — never to accept an error-level rule."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.etc = self.base / "etc"
+        self.etc.mkdir()
+        self.ignore = self.etc / "ignore.yaml"
+        self.ignore.write_text(IGNORE_BASE, encoding="utf-8")
+        self.ignore.chmod(0o644)
+        self.existing("demo")
+        self.existing("other")
+        self.reload()
+
+    def reload(self) -> None:
+        self.config = dataclasses.replace(self.config, config_dir=self.etc,
+                                          policy=load_policy(self.etc))
+
+    def plan(self, text: str) -> plans.Plan:
+        return plans.compute(self.config, self.request(action="ignore", ignore=text))
+
+    def with_entry(self, service: str, rules: str, reason: str = "looked at") -> str:
+        return IGNORE_BASE + (f"  - service: {service}\n    rules: [{rules}]\n"
+                              f"    reason: {reason}\n")
+
+    def test_the_request_takes_the_file_and_no_service(self) -> None:
+        for raw in ({"action": "ignore"},
+                    {"action": "ignore", "ignore": "ignore: []\n", "service": "apps/demo"},
+                    {"action": "edit", "service": "apps/demo", "ignore": "ignore: []\n"},
+                    {"action": "ignore", "ignore": "x" * (64 * 1024 + 1)}):
+            with self.assertRaises(PlanError, msg=repr(raw)):
+                Request.from_dict(raw)
+
+    def test_other_requests_keep_their_fingerprint(self) -> None:
+        self.assertNotIn("ignore", self.request(action="rm", service="apps/demo").to_dict())
+
+    def test_accepting_a_warning_is_planned_then_applied_with_a_snapshot(self) -> None:
+        text = self.with_entry("apps/demo", "image-latest")
+        plan = self.plan(text)
+        self.assertEqual([], plan.blocked)
+        self.assertEqual(str(self.ignore), plan.target)
+        self.assertIn("+  - service: apps/demo", plan.diff)
+        self.assertIn(["write_file", str(self.ignore)], plan.commands)
+        self.assertEqual(IGNORE_BASE, self.ignore.read_text(encoding="utf-8"))  # nothing written
+
+        stored = plans.save(self.config, plan, origin="mcp")
+        outcome = plans.apply(self.config, stored.id)
+        self.assertTrue(outcome.ok, outcome.failed)
+        self.assertEqual(text, self.ignore.read_text(encoding="utf-8"))
+        self.assertEqual(0o644, self.ignore.stat().st_mode & 0o777)
+        snapshots = list((self.root / ".archive" / "clixz" / "config" / "updates").glob(
+            "*-ignore.yaml"))
+        self.assertEqual(1, len(snapshots))
+        self.assertEqual(IGNORE_BASE, snapshots[0].read_text(encoding="utf-8"))
+
+    def test_accepting_an_error_level_rule_is_blocked(self) -> None:
+        plan = self.plan(self.with_entry("apps/other", "privileged"))
+        self.assertTrue(plan.blocked)
+        self.assertIn("operator", " ".join(plan.blocked))
+        self.assertIn("apps/other", " ".join(plan.blocked))
+        with self.assertRaises(PlanError):
+            plans.save(self.config, plan, origin="mcp")
+
+    def test_widening_an_accepted_error_with_a_glob_is_blocked(self) -> None:
+        plan = self.plan(IGNORE_BASE.replace("service: apps/demo", "service: apps/*"))
+        self.assertTrue(plan.blocked)
+
+    def test_an_accepted_error_can_be_kept_reworded_or_removed(self) -> None:
+        reworded = IGNORE_BASE.replace("needs the USB stick", "flashes ESP boards over USB")
+        self.assertEqual([], self.plan(reworded).blocked)
+        self.assertEqual([], self.plan(self.with_entry("apps/other", "no-user")).blocked)
+        self.assertEqual([], self.plan("ignore: []\n").blocked)
+
+    def test_the_level_comes_from_lint_yaml(self) -> None:
+        (self.etc / "lint.yaml").write_text("rules:\n  image-latest: error\n", encoding="utf-8")
+        self.reload()
+        self.assertTrue(self.plan(self.with_entry("apps/demo", "image-latest")).blocked)
+
+    def test_a_file_with_problems_is_never_written(self) -> None:
+        for text in ("ignore: [unclosed\n",
+                     "- just a list\n",
+                     "ignore:\n  - service: apps/demo\n    rules: [no-user]\n",          # no reason
+                     self.with_entry("apps/demo", "no-such-rule"),
+                     IGNORE_BASE + "extra: key\n"):
+            self.assertTrue(self.plan(text).blocked, text)
+
+    def test_identical_is_blocked(self) -> None:
+        self.assertTrue(self.plan(IGNORE_BASE).blocked)
+
+    def test_an_entry_for_no_service_is_a_warning(self) -> None:
+        plan = self.plan(self.with_entry("apps/gone", "no-user"))
+        self.assertEqual([], plan.blocked)
+        self.assertTrue(any("apps/gone" in w for w in plan.warnings), plan.warnings)
+        self.assertEqual([], self.plan(self.with_entry("apps/*", "no-user")).warnings)
+
+    def test_a_file_changed_since_the_plan_is_not_overwritten(self) -> None:
+        stored = plans.save(self.config, self.plan(self.with_entry("apps/demo", "no-user")),
+                            origin="mcp")
+        changed = IGNORE_BASE.replace("needs the USB stick", "edited by hand")
+        self.ignore.write_text(changed, encoding="utf-8")
+        with self.assertRaises(PlanError):
+            plans.apply(self.config, stored.id)
+        self.assertEqual(changed, self.ignore.read_text(encoding="utf-8"))
+
+    def test_a_symlinked_ignore_yaml_is_refused(self) -> None:
+        target = self.base / "elsewhere.yaml"
+        target.write_text(IGNORE_BASE, encoding="utf-8")
+        self.ignore.unlink()
+        self.ignore.symlink_to(target)
+        self.assertTrue(self.plan(self.with_entry("apps/demo", "no-user")).blocked)
+
+    def test_a_missing_ignore_yaml_is_created_0644(self) -> None:
+        self.ignore.unlink()
+        self.reload()
+        text = "ignore:\n  - service: apps/demo\n    rules: [no-user]\n    reason: why\n"
+        plan = self.plan(text)
+        self.assertEqual([], plan.blocked)
+        outcome = plans.apply(self.config, plans.save(self.config, plan, origin="mcp").id)
+        self.assertTrue(outcome.ok, outcome.failed)
+        self.assertEqual(0o644, self.ignore.stat().st_mode & 0o777)
+
+    def test_without_a_config_directory_nothing_is_planned(self) -> None:
+        self.config = dataclasses.replace(self.config, config_dir=None)
+        self.assertTrue(self.plan("ignore: []\n").blocked)
 
 
 if __name__ == "__main__":  # pragma: no cover

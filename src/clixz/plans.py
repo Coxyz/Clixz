@@ -8,8 +8,10 @@ keeps that safe is in this module:
 - a plan is **computed** without writing anything, and **blocked** — never
   stored — when the result would carry an error-level lint finding that
   ``ignore.yaml`` does not accept (privileged, the Docker socket, ``/``…), or
-  an invalid ``service.yaml``. Neither file is writable by the AI, so a compose
-  cannot be used to hand it root;
+  an invalid ``service.yaml``. ``lint.yaml`` is not writable by the AI, and
+  ``ignore.yaml`` only through an ``ignore`` plan that cannot accept an
+  error-level rule (see :func:`_plan_ignore`), so a compose cannot be used to
+  hand it root;
 - a plan is **stored** by root alone (``plans/`` is 0700), under a random id.
   Nothing outside root can write a plan, so an id is proof that clixz computed
   it — no signature needed;
@@ -24,6 +26,7 @@ keeps that safe is in this module:
 from __future__ import annotations
 
 import difflib
+import fnmatch
 import hashlib
 import json
 import os
@@ -37,18 +40,33 @@ import yaml
 
 from . import compose as compose_mod
 from . import komodo as komodo_mod
-from .archive import archive_service
+from .archive import archive_service, snapshot_file
 from .config import Config
 from .meta import SERVICE_FILENAME, parse_meta, scaffold_template, write_manifest
-from .policy import COMPOSE, apply_fixes, audit_all, audit_service, order_fixes, resolve_service
+from .policy import (
+    COMPOSE,
+    apply_fixes,
+    audit_all,
+    audit_service,
+    list_services,
+    order_fixes,
+    resolve_service,
+)
+from .rules import IGNORE_FILE, Ignore, parse_ignores
 from .scaffold import CreateRequest, create_service, edit_service, plan_create, validate_service_name
-from .system import CommandExecutionError
+from .system import CommandExecutionError, CommandRunner
 
-ACTIONS = ("new", "edit", "fix", "rm")
+ACTIONS = ("new", "edit", "fix", "rm", "ignore")
+# Actions that act on no service: fix (all of them, when none is given) and
+# ignore (the host's ignore.yaml).
+_SERVICELESS = ("fix", "ignore")
 PLAN_TTL = timedelta(hours=1)
 KEEP_EXPIRED = timedelta(hours=24)
 MAX_COMPOSE = 128 * 1024
 MAX_SERVICE_YAML = 32 * 1024
+MAX_IGNORE = 64 * 1024
+# Where the previous ignore.yaml is kept: .archive/clixz/config/updates/.
+IGNORE_ARCHIVE = ("clixz", "config")
 PLAN_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?$")
 STACK_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -89,6 +107,7 @@ class Request:
     compose: str | None = None
     service_yaml: str | None = None
     stack: str | None = None
+    ignore: str | None = None   # the whole new ignore.yaml, for 'ignore'
 
     @classmethod
     def from_dict(cls, raw: object) -> "Request":
@@ -100,12 +119,19 @@ class Request:
         service = raw.get("service")
         if service is not None and (not isinstance(service, str) or not SERVICE_RE.match(service)):
             raise PlanError(f"invalid service name: {service!r}")
-        if service is None and action != "fix":
+        if service is None and action not in _SERVICELESS:
             raise PlanError(f"'{action}' needs a service")
+        if service is not None and action == "ignore":
+            raise PlanError("'ignore' replaces the host's ignore.yaml: it takes no service")
         compose = _optional_text(raw, "compose", MAX_COMPOSE)
         service_yaml = _optional_text(raw, "service_yaml", MAX_SERVICE_YAML)
         if action not in ("new", "edit") and (compose is not None or service_yaml is not None):
             raise PlanError("compose and service_yaml only go with 'new' and 'edit'")
+        ignore = _optional_text(raw, "ignore", MAX_IGNORE)
+        if action == "ignore" and ignore is None:
+            raise PlanError("'ignore' needs the whole new ignore.yaml in 'ignore'")
+        if action != "ignore" and ignore is not None:
+            raise PlanError("'ignore' (the file) only goes with the 'ignore' action")
         stack = raw.get("stack")
         if stack is not None:
             if action != "new":
@@ -113,11 +139,16 @@ class Request:
             if not isinstance(stack, str) or not STACK_RE.match(stack):
                 raise PlanError(f"invalid stack name: {stack!r}")
         return cls(action=str(action), service=service, compose=compose,
-                   service_yaml=service_yaml, stack=stack)
+                   service_yaml=service_yaml, stack=stack, ignore=ignore)
 
     def to_dict(self) -> dict:
-        return {"action": self.action, "service": self.service, "compose": self.compose,
-                "service_yaml": self.service_yaml, "stack": self.stack}
+        out = {"action": self.action, "service": self.service, "compose": self.compose,
+               "service_yaml": self.service_yaml, "stack": self.stack}
+        # Only when set: the other actions keep the request — and so the
+        # fingerprint — they had before 'ignore' existed.
+        if self.ignore is not None:
+            out["ignore"] = self.ignore
+        return out
 
 
 # ─── plan ────────────────────────────────────────────────────────────────────
@@ -380,10 +411,116 @@ def _plan_rm(config: Config, request: Request) -> Plan:
     return plan
 
 
+def _error_acceptances(config: Config, entries: tuple[Ignore, ...]) -> set[tuple[str, str]]:
+    """The (service pattern, rule) pairs that accept a rule ``lint.yaml`` makes an error."""
+    levels = config.policy.lint.levels
+    return {(entry.service, rule) for entry in entries for rule in entry.rules
+            if levels.get(rule) == "error"}
+
+
+def _parse_ignore_text(text: str, issues: list[str]) -> tuple[Ignore, ...] | None:
+    """The entries of an ignore.yaml text; None when it is not one at all."""
+    try:
+        raw = yaml.safe_load(text) if text.strip() else {}
+    except yaml.YAMLError as exc:
+        issues.append(f"{IGNORE_FILE}: not valid YAML: {exc}")
+        return None
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        issues.append(f"{IGNORE_FILE}: top-level YAML must be a mapping")
+        return None
+    return parse_ignores(raw, issues)
+
+
+def write_ignore(config: Config, text: str, *, dry_run: bool = False) -> list[list[str]]:
+    """Replace the host's ignore.yaml with ``text``; return the commands.
+
+    The previous file is copied under ``.archive/clixz/config/updates/`` first.
+    The new content is written in place, so the file keeps its owner and mode;
+    a file that did not exist yet is made 0644, like `clixz rules --edit-ignore`.
+    """
+    if config.config_dir is None:
+        raise RuntimeError("no config file in use — ignore.yaml lives next to it")
+    path = config.config_dir / IGNORE_FILE
+    # Written as root: through a link, the write would land on its target.
+    if path.is_symlink():
+        raise RuntimeError(f"{path} is a symlink — refusing to write through it")
+    runner = CommandRunner(dry_run=dry_run)
+    commands: list[list[str]] = []
+    existed = path.exists()
+    if existed:
+        snapshot = snapshot_file(config, *IGNORE_ARCHIVE, path, dry_run=dry_run)
+        commands += [["mkdir", "-p", str(snapshot.parent)],
+                     ["cp", "-p", str(path), str(snapshot)]]
+    runner.write_file(path, text)
+    if not existed:
+        runner.run(["chmod", "644", str(path)])
+    return commands + runner.executed
+
+
+def _plan_ignore(config: Config, request: Request) -> Plan:
+    """Replace ignore.yaml — never to accept an error-level rule.
+
+    Accepting a ``warn`` or ``info`` finding changes what `clixz check` shows
+    and nothing else: such findings never block a plan. Accepting an
+    ``error`` one would unblock plans — a privileged compose, the Docker
+    socket — so the pairs (service, rule) at error level in ``lint.yaml`` must
+    all be in the current file already. The AI can keep them, reword their
+    reason or remove them; adding one stays the operator's decision, by hand.
+    """
+    assert request.ignore is not None
+    blocked: list[str] = []
+    warnings: list[str] = []
+    plan = Plan(action="ignore", target=IGNORE_FILE, request=request)
+    if config.config_dir is None:
+        plan.blocked = ["no config file in use — ignore.yaml lives next to it"]
+        return plan
+    path = config.config_dir / IGNORE_FILE
+    plan.target = str(path)
+    if path.is_symlink():
+        plan.blocked = [f"{path} is a symlink — refusing to read or write through it"]
+        return plan
+
+    current = _read(path)
+    if request.ignore == current:
+        plan.blocked = ["identical to the current ignore.yaml: nothing to change"]
+        return plan
+
+    entries = _parse_ignore_text(request.ignore, blocked)
+    if entries is not None:
+        # A problem parse_ignores reports (no reason, unknown rule, unknown key)
+        # would be silently dropped when the file is read: a plan never writes
+        # one.
+        current_entries = (_parse_ignore_text(current, []) or ()) if current else ()
+        added = _error_acceptances(config, entries) - _error_acceptances(config, current_entries)
+        for service, rule in sorted(added):
+            blocked.append(
+                f"{IGNORE_FILE}: accepting '{rule}' for {service} — an error in lint.yaml — "
+                "is the operator's decision, not a plan's: `sudo clixz rules --edit-ignore`")
+        known = [f"{c}/{s}" for c, s, _ in list_services(config)]
+        for entry in entries:
+            if not any(fnmatch.fnmatchcase(svc, entry.service) for svc in known):
+                warnings.append(f"{IGNORE_FILE}: '{entry.service}' matches no service "
+                                "(a typo, or a service since removed?)")
+    if blocked:
+        plan.blocked = blocked
+        return plan
+
+    plan.diff = _diff(current, request.ignore, IGNORE_FILE)
+    try:
+        plan.commands = write_ignore(config, request.ignore, dry_run=True)
+    except RuntimeError as exc:
+        blocked.append(str(exc))
+    plan.blocked, plan.warnings = blocked, warnings
+    plan.fingerprint = _digest(request.to_dict(), _sha(current))
+    return plan
+
+
 def compute(config: Config, request: Request) -> Plan:
     """The plan for ``request`` against the disk as it is. Writes nothing."""
     return {"new": _plan_new, "edit": _plan_edit, "fix": _plan_fix,
-            "rm": _plan_rm}[request.action](config, request)
+            "rm": _plan_rm, "ignore": _plan_ignore}[request.action](config, request)
 
 
 # ─── store ───────────────────────────────────────────────────────────────────
@@ -522,6 +659,9 @@ def execute(config: Config, plan: Plan, *, komodo_client: object = None) -> Outc
             outcome.ok = not result.failed
         elif plan.action == "rm":
             outcome.executed = archive_service(config, category, name, dry_run=False).commands
+        elif plan.action == "ignore":
+            assert request.ignore is not None
+            outcome.executed = write_ignore(config, request.ignore)
     except (CommandExecutionError, RuntimeError, OSError, KeyError, ValueError) as exc:
         outcome.ok = False
         outcome.failed.append(([plan.action, plan.target], str(exc)))

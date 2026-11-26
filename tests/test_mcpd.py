@@ -57,9 +57,23 @@ class RelayRoutingTests(unittest.TestCase):
             request = {"cmd": "plan", "action": action, "service": "apps/x"}
             if action in ("new", "edit"):
                 request |= {"compose": "services: {}\n", "service_yaml": "name: x\n"}
+            if action == "ignore":
+                request = {"cmd": "plan", "action": "ignore", "ignore": "ignore: []\n"}
             kind, payload = route(request)
             self.assertEqual("relay", kind, action)
             self.assertEqual(request, payload)
+
+    def test_an_ignore_plan_carries_the_file_and_nothing_else(self) -> None:
+        _, payload = route({"cmd": "plan", "action": "ignore", "ignore": "ignore: []\n",
+                            "compose": "services: {}\n", "lint": "rules: {}\n"})
+        self.assertEqual({"cmd": "plan", "action": "ignore", "ignore": "ignore: []\n"}, payload)
+        for bad in ({"cmd": "plan", "action": "ignore"},
+                    {"cmd": "plan", "action": "ignore", "ignore": 3},
+                    {"cmd": "plan", "action": "ignore", "ignore": "x" * (64 * 1024 + 1)},
+                    {"cmd": "plan", "action": "ignore", "ignore": "ignore: []\n",
+                     "service": "apps/x"}):
+            with self.assertRaises(RequestError, msg=bad):
+                route(bad)
 
     def test_a_mutating_verb_cannot_be_called_directly(self) -> None:
         for action in APPLIED_ACTIONS:

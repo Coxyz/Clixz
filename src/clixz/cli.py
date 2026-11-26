@@ -500,6 +500,15 @@ def exposed_cmd(
     console.print(f"\n[dim]{summary['total']} proxy host(s), {summary['enabled']} enabled.[/dim]")
 
 
+def _read_text(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 @app.command("rules", rich_help_panel=INSPECT)
 def rules_cmd(
     edit: Annotated[bool, typer.Option(
@@ -542,6 +551,9 @@ def rules_cmd(
         "issues": list(policy.issues),
     }
     if json_out:
+        # The file as written, comments included: an `ignore` plan replaces it
+        # whole, and the MCP client must be able to start from it.
+        payload["ignore_text"] = _read_text(policy.ignore_source)
         return emit(payload)
 
     table = Table(box=None, pad_edge=False, title="Compose rules", title_justify="left")

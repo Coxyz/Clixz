@@ -117,6 +117,19 @@ def mcpd_stale() -> bool | None:
     return started_at < Path(_package_init).stat().st_mtime
 
 
+def out_of_date(config: Config, unit_dir: Path = UNIT_DIR) -> list[str]:
+    """The units `clixz daemon install` would rewrite or restart, by name.
+
+    `clixz upgrade` asks when there is nothing newer to install: an operator
+    who upgraded without sudo, or edited a unit by hand, is otherwise told all
+    is well while the host runs something else than the package describes.
+    """
+    stale = [name for name, state in unit_drift(config, unit_dir).items() if state != "ok"]
+    if MCPD_UNIT not in stale and mcpd_stale():
+        stale.append(MCPD_UNIT)
+    return stale
+
+
 def install(config: Config, *, unit_dir: Path = UNIT_DIR, dry_run: bool = False) -> list[list[str]]:
     """Put the host in the state the package describes; return what was run."""
     runner = CommandRunner(dry_run=dry_run)

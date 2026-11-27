@@ -256,6 +256,64 @@ class RepoOwnerCliTests(unittest.TestCase):
         self.assertEqual(["CHOWN", "FOWNER"], hook["cap_add"])
 
 
+class UpgradeUpToDateTests(unittest.TestCase):
+    """`clixz upgrade` with nothing newer on PyPI still looks at the units."""
+
+    def setUp(self) -> None:
+        from unittest import mock
+
+        from clixz import __version__
+        from clixz import daemon as daemon_mod
+        from clixz.upgrade import UpgradePlan
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        me = pwd.getpwuid(os.getuid()).pw_name
+        group = grp.getgrgid(os.getgid()).gr_name
+        self.config = root / "config.yaml"
+        self.config.write_text(yaml.safe_dump({
+            "root_dir": str(root / "tree"),
+            "categories": {"apps": {"user": me, "group": group}},
+            "npm": {"database": None},
+            "state": {"dir": str(root / "state")},
+        }), encoding="utf-8")
+        self.units = root / "units"
+        self.units.mkdir()
+        (self.units / daemon_mod.MCPD_UNIT).write_text("installed", encoding="utf-8")
+        self.stale: list[str] = []
+        for target, value in (
+            ("clixz.cli.plan_upgrade", mock.Mock(return_value=UpgradePlan("uv", ["uv"]))),
+            ("clixz.cli.latest_version", mock.Mock(return_value=__version__)),
+            ("clixz.daemon.UNIT_DIR", self.units),
+            ("clixz.daemon.out_of_date", lambda config, unit_dir: self.stale),
+        ):
+            patcher = mock.patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.runner = CliRunner()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _upgrade(self):
+        return self.runner.invoke(app, ["-c", str(self.config), "upgrade"],
+                                  env={"NO_COLOR": "1", "COLUMNS": "200"})
+
+    def test_units_in_step_say_nothing_more(self) -> None:
+        result = self._upgrade()
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertIn("is the latest release", result.output)
+        self.assertNotIn("daemon install", result.output)
+
+    def test_drifted_units_are_named_with_the_command_that_fixes_them(self) -> None:
+        self.stale = ["clixz-mcpd.service", "clixz-apply.socket"]
+        result = self._upgrade()
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertIn("is the latest release", result.output)
+        self.assertIn("clixz-mcpd.service, clixz-apply.socket", result.output)
+        self.assertIn("sudo clixz daemon install", result.output)
+
+
 
 if __name__ == "__main__":
     unittest.main()

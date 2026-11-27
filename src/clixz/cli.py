@@ -1772,6 +1772,15 @@ def _launcher() -> str:
     return script
 
 
+def _warn_out_of_date_units() -> None:
+    # Nothing to install does not mean the host runs this version: an earlier
+    # upgrade without sudo leaves the units, and the gateway, behind.
+    stale = daemon_mod.out_of_date(ctx.config, daemon_mod.UNIT_DIR)
+    if stale:
+        console.print(f"[yellow]![/yellow] Not as this version describes them: {', '.join(stale)}. "
+                      "Run `sudo clixz daemon install`.")
+
+
 @app.command("upgrade", rich_help_panel=ITSELF)
 def upgrade_cmd(
     plan: Annotated[bool, typer.Option(
@@ -1801,6 +1810,8 @@ def upgrade_cmd(
 
     if latest is not None and latest == __version__:
         console.print(f"[green]✓[/green] clixz {__version__} is the latest release.")
+        if units_installed:
+            _warn_out_of_date_units()
         return
     if shutil.which(upgrade.argv[0]) is None:
         err.print(f"[red]ERROR[/red] {upgrade.argv[0]} installed clixz but was not found on PATH.")
@@ -1836,6 +1847,8 @@ def upgrade_cmd(
         raise typer.Exit(code=1)
     if after is None or after == __version__:
         console.print(f"[green]✓[/green] clixz {__version__}: nothing newer was installed.")
+        if units_installed:
+            _warn_out_of_date_units()
         return
     console.print(f"[green]✓[/green] clixz {__version__} → {after}")
     if not units_installed:

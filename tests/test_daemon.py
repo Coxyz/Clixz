@@ -182,5 +182,37 @@ class DriftTests(unittest.TestCase):
             self.assertEqual("differs", daemon.unit_drift(config, base)["clixz-apply.socket"])
 
 
+class OutOfDateTests(unittest.TestCase):
+    """What `clixz upgrade` reports when there is no newer release to install."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.config = _config(self.base)
+        for name, text in daemon.render_units(self.config).items():
+            (self.base / name).write_text(text, encoding="utf-8")
+        patcher = mock.patch.object(daemon, "mcpd_stale", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_units_as_rendered_are_up_to_date(self) -> None:
+        self.assertEqual([], daemon.out_of_date(self.config, self.base))
+
+    def test_a_unit_edited_by_hand_is_reported(self) -> None:
+        (self.base / "clixz-apply.socket").write_text("changed", encoding="utf-8")
+        self.assertEqual(["clixz-apply.socket"], daemon.out_of_date(self.config, self.base))
+
+    def test_a_missing_unit_is_reported(self) -> None:
+        (self.base / "clixz-inspect@.service").unlink()
+        self.assertEqual(["clixz-inspect@.service"], daemon.out_of_date(self.config, self.base))
+
+    def test_a_gateway_running_older_code_is_reported(self) -> None:
+        with mock.patch.object(daemon, "mcpd_stale", return_value=True):
+            self.assertEqual([daemon.MCPD_UNIT], daemon.out_of_date(self.config, self.base))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

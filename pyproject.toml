@@ -41,6 +41,8 @@ clixz-mcpd = "clixz.mcpd:main"
 # The per-request root applier, started by clixz-apply.socket. Same reasoning:
 # a console script under the root-owned venv, reached through /usr/local/bin.
 clixz-apply = "clixz.applyd:main"
+# 2.6: reads of the running containers, started by clixz-inspect.socket.
+clixz-inspect = "clixz.inspectd:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "clixz.__version__" }

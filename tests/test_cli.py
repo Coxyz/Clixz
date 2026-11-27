@@ -73,6 +73,27 @@ class CheckSummaryTests(unittest.TestCase):
         self.assertIn("compose      1 error(s), 4 warning(s), 1 info", out)
         self.assertEqual(4, out.count("  warn "))
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
+    def test_an_unreadable_category_points_to_sudo_not_to_fix(self) -> None:
+        # The operator is in no svc_* group: `clixz fix` cannot help, `sudo clixz check` does.
+        category = Path(self._tmp.name) / "tree" / "apps"
+        category.chmod(0o000)
+        try:
+            out = self._check().stdout
+        finally:
+            category.chmod(0o750)
+        self.assertIn("Run `sudo clixz check`", out)
+        # mode 000 is also a real permission finding, which `fix` does repair.
+        self.assertIn("Run `sudo clixz fix`", out)
+
+    def test_the_fix_hint_is_absent_when_the_only_error_is_unreadable(self) -> None:
+        from clixz.cli import check_hints
+        hints = check_hints(unreadable=2, others=0)
+        self.assertEqual(1, len(hints))
+        self.assertIn("sudo clixz check", hints[0])
+        self.assertNotIn("fix", hints[0])
+        self.assertEqual([], check_hints(unreadable=0, others=0))
+
     def test_an_ignored_finding_leaves_every_count(self) -> None:
         (self.config.parent / "ignore.yaml").write_text(yaml.safe_dump({"ignore": [
             {"service": "apps/demo", "rules": ["privileged", "no-cap-drop", "missing-file"],

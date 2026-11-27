@@ -23,6 +23,12 @@ Protocol — one JSON object per connection, newline-terminated::
     {"cmd": "plan", "action": "ignore", "ignore": "ignore: …"} → clixz-apply
     {"cmd": "apply", "plan_id": "0a1b2c3d"}                   → clixz-apply
     {"cmd": "plan", "action": "category-add", "name": "media"} → CLI --plan, here
+    {"cmd": "container-logs", "name": "atuin", "tail": 100}   → clixz-inspect
+    {"cmd": "host"}                                           → computed here
+
+2.6 adds a third socket, ``clixz-inspect``: the running containers, read from
+dockerd in GET only by a process whose one privilege is the ``docker`` group.
+The host's own health (``host``) needs nothing at all and is computed here.
 """
 
 from __future__ import annotations
@@ -38,11 +44,13 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .category import ACCOUNT_NAME_RE, CATEGORY_NAME_RE
-from .config import env
+from .config import env, load_config
+from .hoststat import host_status
 from .plans import MAX_COMPOSE, MAX_IGNORE, MAX_SERVICE_YAML, PLAN_ID_RE, STACK_RE
 from .repo import REPO_NAME_RE, REPO_URL_RE
 from .todo import STATES
@@ -50,14 +58,17 @@ from .todo import STATES
 CLIXZ_BIN = env("BIN", "/usr/local/bin/clixz")
 SOCKET_PATH = env("MCPD_SOCKET", "/run/clixz-mcpd/clixz-mcpd.sock")
 APPLY_SOCKET = env("APPLY_SOCKET", "/run/clixz-apply.sock")
+INSPECT_SOCKET = env("INSPECT_SOCKET", "/run/clixz-inspect.sock")
 TIMEOUT = int(env("MCPD_TIMEOUT", "60"))
 APPLY_TIMEOUT = int(env("APPLY_TIMEOUT", "120"))
+INSPECT_TIMEOUT = int(env("INSPECT_TIMEOUT", "90"))
 MAX_OUTPUT = 256 * 1024
 MAX_REQUEST = 512 * 1024
 MAX_RESPONSE = 4 * 1024 * 1024
 
 _SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?$")
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 # Read-only verbs, run as-is through the CLI, unprivileged.
 READ_COMMANDS = ("ls", "show", "check", "manifest", "config", "rules", "repos",
@@ -74,6 +85,8 @@ NAMED_PLAN_ACTIONS = {
 # Everything else that goes to clixz-apply as it is.
 RELAYED = ("plans", "plan-show", "plan-drop", "apply", "exposed",
            "todo-add", "todo-edit", "todo-rm")
+# Reads of the running containers, relayed to clixz-inspect.
+INSPECTED = ("containers", "container", "container-stats", "container-logs", "docker-info")
 # Read verbs that are a subcommand of a group.
 _GROUP_READS = {"repos": ["repo", "ls"], "categories": ["category", "ls"]}
 
@@ -187,7 +200,7 @@ def build_argv(req: dict) -> list[str]:
     raise RequestError(
         f"command not allowed: {cmd!r} (read: {', '.join(READ_COMMANDS)}; "
         f"plan: {', '.join((*APPLIED_ACTIONS, *NAMED_PLAN_ACTIONS))}; "
-        f"relayed: {', '.join(RELAYED)})"
+        f"relayed: {', '.join(RELAYED)}; inspect: {', '.join(INSPECTED)}, host)"
     )
 
 
@@ -229,11 +242,46 @@ def _relay_payload(req: dict) -> dict:
     return out
 
 
+def _inspect_payload(req: dict) -> dict:
+    """The fields clixz-inspect understands, checked; everything else dropped."""
+    cmd = req["cmd"]
+    out: dict[str, Any] = {"cmd": cmd}
+    name = req.get("name")
+    if cmd in ("container", "container-logs") or (cmd == "container-stats" and name is not None):
+        if not isinstance(name, str) or not _CONTAINER_RE.match(name):
+            raise RequestError(f"invalid container name: {name!r}")
+        out["name"] = name
+    if cmd == "container-logs":
+        for key in ("tail", "since"):
+            value = req.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise RequestError(f"'{key}' must be a positive whole number, got {value!r}")
+            out[key] = value
+    return out
+
+
+def _host() -> dict:
+    try:
+        root_dir = load_config()[0].root_dir
+    except (ValueError, OSError):
+        root_dir = Path("/srv/docker")
+    try:
+        return {"ok": True, "host": host_status(root_dir)}
+    except Exception as exc:  # noqa: BLE001 - an odd /proc must not cost the caller its answer
+        return {"ok": False, "error": f"host status unavailable ({type(exc).__name__})"}
+
+
 def route(req: dict) -> tuple[str, Any]:
-    """``("cli", argv)``, ``("relay", payload)`` or ``("local", answer)``."""
+    """``("cli", argv)``, ``("relay", payload)``, ``("inspect", payload)`` or ``("local", answer)``."""
     cmd = req.get("cmd")
     if cmd == "version":
         return "local", {"ok": True, "version": __version__}
+    if cmd == "host":
+        return "local", _host()
+    if cmd in INSPECTED:
+        return "inspect", _inspect_payload(req)
     if (cmd == "plan" and req.get("action") in APPLIED_ACTIONS) or cmd in RELAYED:
         return "relay", _relay_payload(req)
     return "cli", build_argv(req)
@@ -270,8 +318,17 @@ def access() -> dict:
             "exposed": "read the proxy database, live", "todo-add": "add a todo item",
             "todo-edit": "edit a todo item", "todo-rm": "delete a todo item"}
     relay += [{"request": cmd, "does": does[cmd]} for cmd in RELAYED]
-    return {"socket": SOCKET_PATH, "apply_socket": APPLY_SOCKET,
-            "read": read, "plan": plan, "relay": relay}
+    inspect_does = {
+        "containers": "every container, summarised",
+        "container": "one container, filtered: no environment value, no command",
+        "container-stats": "CPU, memory, PIDs, I/O of one container or of every running one",
+        "container-logs": "the last lines, masked — only for the services in docker.logs",
+        "docker-info": "dockerd's version, counts, storage driver, swarm state",
+    }
+    inspect = [{"request": cmd, "does": inspect_does[cmd]} for cmd in INSPECTED]
+    inspect.append({"request": "host", "does": "load, memory, pressure, disks, temperature (here)"})
+    return {"socket": SOCKET_PATH, "apply_socket": APPLY_SOCKET, "inspect_socket": INSPECT_SOCKET,
+            "read": read, "plan": plan, "relay": relay, "inspect": inspect}
 
 
 def run(argv: list[str]) -> dict:
@@ -302,19 +359,22 @@ def run(argv: list[str]) -> dict:
     }
 
 
-def relay(payload: dict) -> dict:
-    """Send one request to clixz-apply and return its answer."""
-    if not os.path.exists(APPLY_SOCKET):
+def relay(payload: dict, socket_path: str | None = None, name: str = "clixz-apply",
+          timeout: int | None = None) -> dict:
+    """Send one request to clixz-apply (or clixz-inspect) and return its answer."""
+    socket_path = socket_path or APPLY_SOCKET
+    timeout = timeout or APPLY_TIMEOUT
+    if not os.path.exists(socket_path):
         return {"ok": False,
-                "error": f"clixz-apply is not installed ({APPLY_SOCKET} is missing): "
+                "error": f"{name} is not installed ({socket_path} is missing): "
                          "run `sudo clixz daemon install` on the host"}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
     chunks: list[bytes] = []
     size = 0
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(APPLY_TIMEOUT)
-            sock.connect(APPLY_SOCKET)
+            sock.settimeout(timeout)
+            sock.connect(socket_path)
             sock.sendall(data)
             while True:
                 chunk = sock.recv(65536)
@@ -323,15 +383,15 @@ def relay(payload: dict) -> dict:
                 chunks.append(chunk)
                 size += len(chunk)
                 if size > MAX_RESPONSE:
-                    return {"ok": False, "error": "clixz-apply answered more than 4 MiB"}
+                    return {"ok": False, "error": f"{name} answered more than 4 MiB"}
                 if chunk.endswith(b"\n"):
                     break
     except (OSError, socket.timeout) as exc:
-        return {"ok": False, "error": f"clixz-apply unreachable: {exc}"}
+        return {"ok": False, "error": f"{name} unreachable: {exc}"}
     try:
         answer = json.loads(b"".join(chunks).decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
-        return {"ok": False, "error": f"unreadable answer from clixz-apply: {exc}"}
+        return {"ok": False, "error": f"unreadable answer from {name}: {exc}"}
     return answer if isinstance(answer, dict) else {"ok": False, "error": "bad answer"}
 
 
@@ -350,6 +410,8 @@ def handle(raw: bytes) -> dict:
         return value
     if kind == "relay":
         return relay(value)
+    if kind == "inspect":
+        return relay(value, INSPECT_SOCKET, "clixz-inspect", INSPECT_TIMEOUT)
     return run(value)
 
 

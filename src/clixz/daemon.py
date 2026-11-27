@@ -7,10 +7,13 @@ templates, ``clixz daemon install`` renders them from the config — the
 gateway's groups are the categories' — and writes the ones that changed, and
 ``clixz upgrade`` runs it from the new version.
 
-Three units:
+Five units:
 
 - ``clixz-mcpd.service``: the unprivileged gateway the MCP container talks to;
 - ``clixz-apply.socket`` and ``clixz-apply@.service``: the root half, one
+  process per request, reachable from the gateway only;
+- ``clixz-inspect.socket`` and ``clixz-inspect@.service`` (2.6): the running
+  containers, read in GET only by a dynamic account in the docker group, one
   process per request, reachable from the gateway only.
 
 Starting is only ever done for a unit that was not installed before: an
@@ -36,9 +39,11 @@ UNIT_DIR = Path("/etc/systemd/system")
 MCPD_UNIT = "clixz-mcpd.service"
 APPLY_SOCKET_UNIT = "clixz-apply.socket"
 APPLY_SERVICE_UNIT = "clixz-apply@.service"
-UNITS = (MCPD_UNIT, APPLY_SOCKET_UNIT, APPLY_SERVICE_UNIT)
-# The units an install enables: the template service is started by the socket.
-ENABLED = (MCPD_UNIT, APPLY_SOCKET_UNIT)
+INSPECT_SOCKET_UNIT = "clixz-inspect.socket"
+INSPECT_SERVICE_UNIT = "clixz-inspect@.service"
+UNITS = (MCPD_UNIT, APPLY_SOCKET_UNIT, APPLY_SERVICE_UNIT, INSPECT_SOCKET_UNIT, INSPECT_SERVICE_UNIT)
+# The units an install enables: the template services are started by their socket.
+ENABLED = (MCPD_UNIT, APPLY_SOCKET_UNIT, INSPECT_SOCKET_UNIT)
 # Units of earlier versions, removed when found.
 RETIRED_UNITS = ("clixz-snapshot.timer", "clixz-snapshot.service",
                  "clixz-admind.service", "clixz-runnerd.service")
@@ -46,6 +51,7 @@ ACCOUNT = "svc_mcprun"
 # try-restart, not restart: a daemon the operator stopped stays stopped.
 RESTART_MCPD = ["systemctl", "try-restart", MCPD_UNIT]
 RESTART_APPLY_SOCKET = ["systemctl", "try-restart", APPLY_SOCKET_UNIT]
+RESTART_INSPECT_SOCKET = ["systemctl", "try-restart", INSPECT_SOCKET_UNIT]
 
 
 def render_units(config: Config) -> dict[str, str]:
@@ -166,6 +172,8 @@ def install(config: Config, *, unit_dir: Path = UNIT_DIR, dry_run: bool = False)
         runner.run(RESTART_MCPD)
     if drift[APPLY_SOCKET_UNIT] == "differs":
         runner.run(RESTART_APPLY_SOCKET)
+    if drift[INSPECT_SOCKET_UNIT] == "differs":
+        runner.run(RESTART_INSPECT_SOCKET)
     return runner.executed
 
 
@@ -179,6 +187,7 @@ def status(config: Config, unit_dir: Path = UNIT_DIR) -> dict:
         "retired_present": [name for name in RETIRED_UNITS if (unit_dir / name).exists()],
         "mcpd_stale": mcpd_stale(),
         "apply_socket": os.path.exists("/run/clixz-apply.sock"),
+        "inspect_socket": os.path.exists("/run/clixz-inspect.sock"),
         "state_dir": str(config.state.dir),
         "state_dir_present": config.state.dir.is_dir(),
     }

@@ -35,7 +35,7 @@ class RenderTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_the_three_units_are_rendered(self) -> None:
+    def test_every_unit_is_rendered(self) -> None:
         self.assertEqual(set(daemon.UNITS), set(self.units))
 
     def test_no_placeholder_is_left(self) -> None:
@@ -63,6 +63,23 @@ class RenderTests(unittest.TestCase):
         socket_unit = self.units["clixz-apply.socket"]
         for line in ("SocketGroup=svc_mcprun", "SocketMode=0660", "Accept=yes"):
             self.assertIn(line, socket_unit)
+
+
+    def test_the_inspector_socket_is_only_for_the_gateway(self) -> None:
+        socket_unit = self.units["clixz-inspect.socket"]
+        for line in ("ListenStream=/run/clixz-inspect.sock", "SocketGroup=svc_mcprun",
+                     "SocketMode=0660", "Accept=yes"):
+            self.assertIn(line, socket_unit)
+
+    def test_the_inspector_holds_the_docker_group_and_nothing_else(self) -> None:
+        # The docker socket is root whatever else is removed: no capability, no
+        # writable path, no network, and not root's own files (dynamic account).
+        lines = self.units["clixz-inspect@.service"].splitlines()
+        for line in ("DynamicUser=yes", "SupplementaryGroups=docker", "CapabilityBoundingSet=",
+                     "NoNewPrivileges=yes", "ProtectSystem=strict", "PrivateNetwork=yes",
+                     "RestrictAddressFamilies=AF_UNIX"):
+            self.assertIn(line, lines)
+        self.assertFalse([line for line in lines if line.startswith(("User=", "ReadWritePaths="))])
 
 
 class InstallTests(unittest.TestCase):
@@ -93,8 +110,8 @@ class InstallTests(unittest.TestCase):
         for name in daemon.UNITS:
             self.assertIn(str(self.unit_dir / name), written)
         self.assertIn(["systemctl", "daemon-reload"], commands)
-        self.assertIn(["systemctl", "enable", "--now", "clixz-mcpd.service", "clixz-apply.socket"],
-                      commands)
+        self.assertIn(["systemctl", "enable", "--now", "clixz-mcpd.service", "clixz-apply.socket",
+                       "clixz-inspect.socket"], commands)
 
     def test_the_account_is_created_only_when_missing(self) -> None:
         self.assertNotIn("useradd", [c[0] for c in self._install()])
@@ -136,6 +153,14 @@ class InstallTests(unittest.TestCase):
         (self.unit_dir / "clixz-apply@.service").unlink()
         commands = self._install()
         self.assertIn(["systemctl", "enable", "--now", "clixz-apply.socket"], commands)
+
+    def test_an_upgrade_from_2_5_starts_the_inspector_socket_only(self) -> None:
+        self._write_current_units()
+        for name in ("clixz-inspect.socket", "clixz-inspect@.service"):
+            (self.unit_dir / name).unlink()
+        commands = self._install()
+        self.assertIn(["systemctl", "enable", "--now", "clixz-inspect.socket"], commands)
+        self.assertNotIn(daemon.RESTART_MCPD, commands)
 
     def test_retired_units_and_the_snapshot_go(self) -> None:
         (self.unit_dir / "clixz-snapshot.timer").write_text("x", encoding="utf-8")

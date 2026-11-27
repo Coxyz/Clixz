@@ -128,6 +128,23 @@ class KomodoConfig:
         return self.credentials is not None
 
 
+@dataclass(frozen=True)
+class DockerConfig:
+    """What the MCP may read of the running containers (2.6).
+
+    Everything ``clixz-inspect`` returns is filtered — no environment value,
+    no command line — except logs, which can carry anything a service prints.
+    So logs are readable only for the services listed in ``logs``
+    (``category/service``). The list lives here, in the operator's config,
+    and not in ``service.yaml``: a plan from the MCP can rewrite a
+    service.yaml, and the AI must not be able to grant itself a service's
+    logs, even through an approval given too quickly.
+    """
+
+    socket: Path = Path("/run/docker.sock")
+    logs: tuple[str, ...] = ()
+
+
 # Every rule, with its built-in default. A config may override any of them; one
 # that omits a rule still works, which keeps `clixz check` usable on a host
 # whose /etc/clixz/config.yaml has not been updated yet.
@@ -160,6 +177,7 @@ class Config:
     npm: NpmConfig = field(default_factory=NpmConfig)
     state: StateConfig = field(default_factory=StateConfig)
     komodo: KomodoConfig = field(default_factory=KomodoConfig)
+    docker: DockerConfig = field(default_factory=DockerConfig)
     # The directory config.yaml was read from; None for the bundled default.
     config_dir: Path | None = None
     # lint.yaml and ignore.yaml, read from config_dir.
@@ -280,6 +298,7 @@ def parse_config(raw: dict) -> Config:
         npm=npm,
         state=_parse_state(raw.get("state")),
         komodo=_parse_komodo(raw.get("komodo")),
+        docker=_parse_docker(raw.get("docker")),
     )
 
 
@@ -315,6 +334,23 @@ def _parse_komodo(raw: object) -> KomodoConfig:
     )
 
 
+_LOGS_ENTRY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
+
+
+def _parse_docker(raw: object) -> DockerConfig:
+    if not isinstance(raw, dict):
+        return DockerConfig()
+    logs = raw.get("logs") or []
+    if not isinstance(logs, list):
+        raise ValueError("docker.logs must be a list of category/service")
+    # A malformed entry grants nothing: validate_config reports it.
+    entries = tuple(str(e) for e in logs if isinstance(e, str) and _LOGS_ENTRY_RE.match(e))
+    return DockerConfig(
+        socket=Path(str(raw["socket"])) if raw.get("socket") else DockerConfig.socket,
+        logs=entries,
+    )
+
+
 def load_config(explicit: Path | None = None) -> tuple[Config, Path | None]:
     """Load the config. ``source`` is None when the bundled default is used."""
     source = find_config_path(explicit)
@@ -332,7 +368,7 @@ def load_raw_config(source: Path | None) -> dict:
 # ─── structural validation (for `clixz check`) ───────────────────────────────
 
 KNOWN_TOP_LEVEL = {"root_dir", "categories", "rules", "exclude", "api", "images",
-                   "repos", "npm", "state", "komodo"}
+                   "repos", "npm", "state", "komodo", "docker"}
 
 # Sections v1 understood and v2 does not. Naming them explicitly turns "unknown
 # key" — which reads like a typo — into an actionable migration message.
@@ -344,6 +380,7 @@ RETIRED_KEYS = {
 # `komodo` came back in 2.3 with another meaning: where to create a new
 # service's stack. A key outside this set is most likely v1's ACL principal.
 KOMODO_KEYS = ("credentials", "server", "container", "port", "run_root")
+DOCKER_KEYS = ("socket", "logs")
 
 # `repos` came back in 2.2 with a single key; 2.4 brought owner and mode back,
 # for Komodo, which pulls as root. v1's ACL and `recursive` stay retired.
@@ -406,6 +443,24 @@ def validate_config(raw: dict) -> list[str]:
     elif isinstance(npm, dict) and "snapshot" in npm:
         issues.append("npm.snapshot was retired in 2.3 — `exposed` reads the database live, "
                       "through clixz-apply; remove the key")
+
+    docker = raw.get("docker")
+    if docker is not None and not isinstance(docker, dict):
+        issues.append("'docker' must be a mapping")
+    elif isinstance(docker, dict):
+        for key in docker:
+            if key not in DOCKER_KEYS:
+                issues.append(f"unknown key docker.{key} (known: {', '.join(DOCKER_KEYS)})")
+        logs = docker.get("logs")
+        if logs is not None and not isinstance(logs, list):
+            issues.append("docker.logs must be a list of category/service")
+        elif isinstance(logs, list):
+            known = categories if isinstance(categories, dict) else {}
+            for entry in logs:
+                if not isinstance(entry, str) or not _LOGS_ENTRY_RE.match(entry):
+                    issues.append(f"docker.logs: {entry!r} is not category/service (ignored)")
+                elif entry.split("/", 1)[0] not in known:
+                    issues.append(f"docker.logs: {entry!r} names an unknown category")
 
     for section in ("state", "komodo"):
         if raw.get(section) is not None and not isinstance(raw[section], dict):

@@ -262,7 +262,7 @@ clears them with `setfacl -b`.
 
 ## The MCP gateway
 
-Two halves, one boundary:
+Three processes, one boundary:
 
 - **`clixz-mcpd`** — unprivileged, on a Unix socket mounted into the MCP
   container. Reads run the CLI, here. The unit keeps `ProtectSystem=strict` and
@@ -275,6 +275,19 @@ Two halves, one boundary:
   manifest and `ignore.yaml` in place (an ignore plan, which never accepts an
   error-level rule) — not the config, not `lint.yaml`, and nothing new in
   `/etc/clixz`.
+- **`clixz-inspect`** (2.6) — the running containers, for one request
+  (`clixz-inspect.socket`, `Accept=yes`), reachable from `clixz-mcpd` only. A
+  dynamic account whose one privilege is the `docker` group: no capability, no
+  writable path, no network. It reads dockerd in **GET only** and filters what it
+  read: containers, state and health, the security-relevant `HostConfig`, mounts,
+  stats, `docker info` — never an environment value, a command line, or a label
+  value outside compose's. **Logs** only for the services in the config's
+  `docker.logs`, masked (environment values of the container, credentials in
+  URLs, `Authorization`, `key=value` secrets, JWTs, private keys, opaque tokens)
+  and bounded. That list is edited by hand: no plan writes `config.yaml`.
+
+The host's own health (`host`: load, memory, pressure, disks, temperature) is
+read from `/proc` and `/sys` by `clixz-mcpd` itself.
 
 A service plan is the unit of trust:
 
@@ -300,6 +313,10 @@ clixz daemon status          # are the installed units this version's? are they 
 
 The gateway's groups are the categories' groups, computed at install time: after
 `clixz category add`, run `sudo clixz daemon install` again.
+
+The operator is in no `svc_*` group and not in `docker` (2026-11-27): every
+`clixz` command runs with `sudo`. A `check` without it reports the categories it
+could not read and says so.
 
 To create stacks in Komodo, give clixz an API key of a Komodo service user
 (non-admin) in `/etc/clixz/komodo.yaml` (`key:`, `secret:`, root 0600) and add a

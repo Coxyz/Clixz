@@ -14,6 +14,7 @@ from unittest import mock
 from clixz import mcpd
 from clixz.mcpd import (
     APPLIED_ACTIONS,
+    INSPECTED,
     NAMED_PLAN_ACTIONS,
     READ_COMMANDS,
     RELAYED,
@@ -240,6 +241,43 @@ class AccessTests(unittest.TestCase):
     def test_named_mutations_are_only_ever_planned(self) -> None:
         for row in access()["plan"]:
             self.assertIn("--plan", row["runs"], row)
+
+
+class InspectRoutingTests(unittest.TestCase):
+    """Reads of the running containers go to clixz-inspect, checked here too."""
+
+    def test_each_read_is_routed_with_its_fields_only(self) -> None:
+        self.assertEqual(("inspect", {"cmd": "containers"}), route({"cmd": "containers", "all": 0}))
+        self.assertEqual(("inspect", {"cmd": "container", "name": "atuin"}),
+                         route({"cmd": "container", "name": "atuin", "env": True}))
+        self.assertEqual(("inspect", {"cmd": "container-stats"}), route({"cmd": "container-stats"}))
+        self.assertEqual(("inspect", {"cmd": "container-logs", "name": "atuin", "tail": 50, "since": 60}),
+                         route({"cmd": "container-logs", "name": "atuin", "tail": 50, "since": 60,
+                                "follow": True}))
+
+    def test_names_and_numbers_are_checked(self) -> None:
+        for request in ({"cmd": "container"}, {"cmd": "container", "name": "../x"},
+                        {"cmd": "container-logs", "name": "a;rm"},
+                        {"cmd": "container-logs", "name": "atuin", "tail": True},
+                        {"cmd": "container-logs", "name": "atuin", "since": -5},
+                        {"cmd": "container-stats", "name": 3}):
+            with self.assertRaises(RequestError, msg=request):
+                route(request)
+
+    def test_listed_for_the_operator(self) -> None:
+        listed = [r["request"] for r in access()["inspect"]]
+        self.assertEqual([*INSPECTED, "host"], listed)
+
+    def test_a_missing_inspector_says_how_to_install_it(self) -> None:
+        with mock.patch.object(mcpd, "INSPECT_SOCKET", "/nonexistent/clixz-inspect.sock"):
+            answer = handle(b'{"cmd": "containers"}')
+        self.assertFalse(answer["ok"])
+        self.assertIn("clixz-inspect is not installed", answer["error"])
+
+    def test_host_is_computed_here(self) -> None:
+        kind, answer = route({"cmd": "host"})
+        self.assertEqual("local", kind)
+        self.assertIn("memory", answer["host"])
 
 
 class ValidationTests(unittest.TestCase):

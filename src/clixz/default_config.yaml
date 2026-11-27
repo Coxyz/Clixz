@@ -81,5 +81,16 @@ npm:
 #   container: komodo-core # without a url, this container's IP, port 9120
 #   run_root: /services    # where Periphery mounts root_dir
 
+# What the MCP may read of the running containers (clixz-inspect, 2.6). The
+# containers are always listed, inspected and measured — filtered: never an
+# environment value nor a command line. Their LOGS are readable only for the
+# services listed here: a log can carry anything a service prints, and the
+# masking is best effort. This list is the operator's: no plan can change it.
+# docker:
+#   socket: /run/docker.sock
+#   logs:
+#     - apps/atuin
+#     - infra/komodo
+
 # The compose rules and the accepted exceptions are not in this file: see
 # lint.yaml and ignore.yaml next to it (`clixz rules`).

@@ -344,6 +344,23 @@ def _print_finding(finding: Finding, indent: str = "  ") -> None:
     )
 
 
+def check_hints(*, unreadable: int, others: int) -> list[str]:
+    """The closing advice of `check`, by kind of permission error.
+
+    An unreadable category is not a permission to repair: the directory is
+    right, this account is simply not in its group — the operator is in none
+    of them, by design (2026-11-27). Until 2.6 every error pointed to
+    `clixz fix`, which has nothing to change there.
+    """
+    hints = []
+    if unreadable:
+        hints.append(f"{unreadable} categor{'y was' if unreadable == 1 else 'ies were'} not audited: "
+                     "this account is not in their group. Run `sudo clixz check`.")
+    if others:
+        hints.append("Run `sudo clixz fix` to repair the permission findings.")
+    return hints
+
+
 @app.command("check", rich_help_panel=INSPECT)
 def check_cmd(
     service: Annotated[Optional[str], typer.Argument(autocompletion=_complete_service)] = None,
@@ -453,8 +470,9 @@ def check_cmd(
            + ("" if verbose else " (--verbose to list them)") + "[/dim]"
            if ignored else "")
     )
-    if errors:
-        console.print("[dim]Run `clixz fix` to repair the permission findings.[/dim]")
+    unreadable = sum(1 for r in reports for f in r.findings if f.rule == "unreadable")
+    for hint in check_hints(unreadable=unreadable, others=errors - unreadable):
+        console.print(f"[dim]{escape(hint)}[/dim]")
     if raw_issues:
         console.print("[dim]The config problems listed at the top are not fixed by "
                       "`clixz fix`: edit the file they name.[/dim]")
@@ -1662,6 +1680,8 @@ MCP_NEVER = (
     "the contents of .env files: never read; `new` creates an empty one, Komodo fills it",
     "deploying: a new service's stack is created in Komodo, never deployed",
     "config --edit, rules --edit, meta --scaffold, image add/rm, upgrade, daemon install",
+    "acting on a container (exec, start, stop, restart, remove): clixz-inspect only reads",
+    "a container's environment values or command line; logs outside config.yaml's docker.logs",
 )
 
 
@@ -1716,7 +1736,9 @@ def mcp_cmd(json_out: Annotated[bool, typer.Option("--json")] = False) -> None:
     for title, key, column, field in (
             ("Reads — the CLI, unprivileged", "read", "RUNS", "runs"),
             ("Planned only — never applied", "plan", "RUNS", "runs"),
-            ("Relayed to clixz-apply (root, one process per request)", "relay", "DOES", "does")):
+            ("Relayed to clixz-apply (root, one process per request)", "relay", "DOES", "does"),
+            ("Containers — clixz-inspect (docker group, GET only, one process per request)",
+             "inspect", "DOES", "does")):
         table = Table(box=None, pad_edge=False, title=title, title_justify="left")
         table.add_column("REQUEST")
         table.add_column(column)

@@ -1,0 +1,18 @@
+# Installed by `sudo clixz daemon install` from the clixz package.
+[Unit]
+Description=clixz-inspect: the running containers, read for the MCP gateway
+
+[Socket]
+# Only clixz-mcpd connects: root:svc_mcprun 0660, outside /run/clixz-mcpd, the
+# one directory mounted into the MCP container.
+ListenStream=/run/clixz-inspect.sock
+SocketUser=root
+SocketGroup=svc_mcprun
+SocketMode=0660
+# One process per request, as for clixz-apply. Fewer at once: a stats request
+# already reads every running container.
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

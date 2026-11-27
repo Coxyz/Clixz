@@ -50,11 +50,14 @@ class RenderTests(unittest.TestCase):
     def test_the_gateway_restarts_whenever_it_exits(self) -> None:
         self.assertIn("Restart=always", self.units["clixz-mcpd.service"])
 
-    def test_the_applier_writes_only_the_tree_the_state_and_the_manifest(self) -> None:
+    def test_the_applier_writes_only_the_tree_the_state_the_manifest_and_ignore(self) -> None:
+        # ignore.yaml is the one file of /etc/clixz an (ignore) plan writes;
+        # config.yaml and lint.yaml stay read-only.
         lines = [line for line in self.units["clixz-apply@.service"].splitlines()
                  if line.startswith("ReadWritePaths=")]
         self.assertEqual([f"ReadWritePaths=/srv/docker {self.base / 'state'} "
-                          f"-{self.base / 'etc' / 'manifest.json'}"], lines)
+                          f"-{self.base / 'etc' / 'manifest.json'} -/etc/clixz/ignore.yaml"],
+                         lines)
 
     def test_the_applier_socket_is_only_for_the_gateway(self) -> None:
         socket_unit = self.units["clixz-apply.socket"]

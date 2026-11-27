@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import __file__ as _package_init
 from .config import DEFAULT_CONFIG_DIR, Config
+from .rules import IGNORE_FILE
 from .system import CommandRunner, group_exists, user_exists
 from .todo import HEADER as TODO_HEADER
 
@@ -55,6 +56,7 @@ def render_units(config: Config) -> dict[str, str]:
         "@CONFIG_DIR@": str(config.config_dir or DEFAULT_CONFIG_DIR),
         "@STATE_DIR@": str(config.state.dir),
         "@MANIFEST@": str(config.resolved_manifest_path),
+        "@IGNORE@": str((config.config_dir or DEFAULT_CONFIG_DIR) / IGNORE_FILE),
     }
     out = {}
     for name in UNITS:

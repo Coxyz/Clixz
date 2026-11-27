@@ -55,7 +55,7 @@ images:
 # its Repos run after each pull so that it hands the files back itself.
 repos:
   dir: /opt/repos
-  # owner: "boxyz_dev:boxyz_dev"
+  # owner: "opxyz:opxyz"
   # mode: "u+rwX,g+rwX,o-w"     # octal, or chmod symbolic (X: dirs and executables)
 
 # `clixz exposed` reads this database to compare what the reverse proxy

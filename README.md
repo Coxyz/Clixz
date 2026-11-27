@@ -153,7 +153,7 @@ rules:
   file: { mode: "640" }                        # compose.yaml, service.yaml
   env:  { mode: "600", owner: "root:root" }    # .env
 images: { dir: /opt/images }
-repos:  { dir: /opt/repos, owner: "boxyz_dev:boxyz_dev", mode: "u+rwX,g+rwX,o-w" }
+repos:  { dir: /opt/repos, owner: "opxyz:opxyz", mode: "u+rwX,g+rwX,o-w" }
 npm:
   database: /srv/docker/network/npm/data/app/database.sqlite
 ```
@@ -271,8 +271,10 @@ Two halves, one boundary:
   (`clixz-apply.socket`, `Accept=yes`) and gone with it. Only `clixz-mcpd` can
   reach its socket. It computes and stores service plans, applies them, reads
   the proxy database live for `exposed`, and writes the todo. It validates every
-  field again, and its sandbox can write the tree, its state directory and the
-  manifest — not the config, not `lint.yaml`, not `ignore.yaml`.
+  field again, and its sandbox can write the tree, its state directory, the
+  manifest and `ignore.yaml` in place (an ignore plan, which never accepts an
+  error-level rule) — not the config, not `lint.yaml`, and nothing new in
+  `/etc/clixz`.
 
 A service plan is the unit of trust:
 

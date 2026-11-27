@@ -20,11 +20,12 @@ Environment=PYTHONUNBUFFERED=1
 # for a config under $HOME, which ProtectHome hides: point it at nothing.
 Environment=DOCKER_CONFIG=@STATE_DIR@/docker
 
-# What it may write: the service tree, its own state (plans, todo) and the
-# manifest it refreshes. Nothing else — not the config, not lint.yaml, not
-# ignore.yaml, not the units: the rules that bound a plan stay out of reach.
+# What it may write: the service tree, its own state (plans, todo), the
+# manifest it refreshes and ignore.yaml, in place (an ignore plan, which never
+# accepts an error-level rule). Nothing else — not the config, not lint.yaml,
+# not the units: the rules that bound a plan stay out of reach.
 ProtectSystem=strict
-ReadWritePaths=@ROOT_DIR@ @STATE_DIR@ -@MANIFEST@
+ReadWritePaths=@ROOT_DIR@ @STATE_DIR@ -@MANIFEST@ -@IGNORE@
 CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 ProtectHome=yes

@@ -437,8 +437,8 @@ def write_ignore(config: Config, text: str, *, dry_run: bool = False) -> list[li
     """Replace the host's ignore.yaml with ``text``; return the commands.
 
     The previous file is copied under ``.archive/clixz/config/updates/`` first.
-    The new content is written in place, so the file keeps its owner and mode;
-    a file that did not exist yet is made 0644, like `clixz rules --edit-ignore`.
+    The new content is written in place, so the file keeps its owner and mode:
+    clixz-apply may write that one file, not create one in the directory.
     """
     if config.config_dir is None:
         raise RuntimeError("no config file in use — ignore.yaml lives next to it")
@@ -446,16 +446,12 @@ def write_ignore(config: Config, text: str, *, dry_run: bool = False) -> list[li
     # Written as root: through a link, the write would land on its target.
     if path.is_symlink():
         raise RuntimeError(f"{path} is a symlink — refusing to write through it")
+    if not path.is_file():
+        raise RuntimeError(f"{path} does not exist — create it with `sudo clixz rules --edit-ignore`")
     runner = CommandRunner(dry_run=dry_run)
-    commands: list[list[str]] = []
-    existed = path.exists()
-    if existed:
-        snapshot = snapshot_file(config, *IGNORE_ARCHIVE, path, dry_run=dry_run)
-        commands += [["mkdir", "-p", str(snapshot.parent)],
-                     ["cp", "-p", str(path), str(snapshot)]]
+    snapshot = snapshot_file(config, *IGNORE_ARCHIVE, path, dry_run=dry_run)
+    commands = [["mkdir", "-p", str(snapshot.parent)], ["cp", "-p", str(path), str(snapshot)]]
     runner.write_file(path, text)
-    if not existed:
-        runner.run(["chmod", "644", str(path)])
     return commands + runner.executed
 
 
@@ -480,6 +476,11 @@ def _plan_ignore(config: Config, request: Request) -> Plan:
     plan.target = str(path)
     if path.is_symlink():
         plan.blocked = [f"{path} is a symlink — refusing to read or write through it"]
+        return plan
+    if not path.is_file():
+        # clixz-apply may write the file in place, not create it in /etc/clixz.
+        plan.blocked = [f"{path} does not exist — the operator creates it: "
+                        "`sudo clixz rules --edit-ignore`"]
         return plan
 
     current = _read(path)

@@ -486,15 +486,14 @@ class IgnorePlanTests(PlanTestCase):
         self.ignore.symlink_to(target)
         self.assertTrue(self.plan(self.with_entry("apps/demo", "no-user")).blocked)
 
-    def test_a_missing_ignore_yaml_is_created_0644(self) -> None:
+    def test_a_missing_ignore_yaml_is_not_created(self) -> None:
+        # clixz-apply may write ignore.yaml in place, not create files in /etc/clixz.
         self.ignore.unlink()
         self.reload()
         text = "ignore:\n  - service: apps/demo\n    rules: [no-user]\n    reason: why\n"
-        plan = self.plan(text)
-        self.assertEqual([], plan.blocked)
-        outcome = plans.apply(self.config, plans.save(self.config, plan, origin="mcp").id)
-        self.assertTrue(outcome.ok, outcome.failed)
-        self.assertEqual(0o644, self.ignore.stat().st_mode & 0o777)
+        [reason] = self.plan(text).blocked
+        self.assertIn("--edit-ignore", reason)
+        self.assertFalse(self.ignore.exists())
 
     def test_without_a_config_directory_nothing_is_planned(self) -> None:
         self.config = dataclasses.replace(self.config, config_dir=None)

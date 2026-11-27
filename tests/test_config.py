@@ -59,13 +59,13 @@ class ValidateTests(unittest.TestCase):
 
     def test_repos_takes_dir_owner_and_mode_and_the_v1_acl_stays_retired(self) -> None:
         self.assertEqual([], validate_config(_v2() | {"repos": {
-            "dir": "/opt/repos", "owner": "boxyz_dev:boxyz_dev", "mode": "u+rwX,g+rwX,o-w"}}))
+            "dir": "/opt/repos", "owner": "opxyz:opxyz", "mode": "u+rwX,g+rwX,o-w"}}))
         self.assertEqual([], validate_config(_v2() | {"repos": {"mode": "2775"}}))
         issues = validate_config(_v2() | {"repos": {"dir": "/opt/repos", "acl": {}}})
         self.assertTrue(any(i.startswith("repos.acl was retired") for i in issues))
 
     def test_a_bad_repos_owner_or_mode_is_reported(self) -> None:
-        issues = validate_config(_v2() | {"repos": {"owner": "boxyz_dev", "mode": "rwx; rm"}})
+        issues = validate_config(_v2() | {"repos": {"owner": "opxyz", "mode": "rwx; rm"}})
         self.assertTrue(any(i.startswith("repos.owner must be") for i in issues))
         self.assertTrue(any(i.startswith("repos.mode must be") for i in issues))
 
